@@ -1,3 +1,3 @@
-risk_tier,threshold,jobs_flagged,true_positives,false_positives,precision,recall,pct_of_total
-High,0.75,93,88,5,0.9462,0.2385,0.1319
-Medium,0.65,185,158,27,0.8541,0.4282,0.2624
+period_label,risk_tier,threshold,jobs_flagged,true_positives,false_positives,precision,recall,pct_of_total
+202601,High,0.75,40,38,2,0.95,0.2815,0.1481
+202601,Medium,0.65,74,61,13,0.8243,0.4519,0.2741
