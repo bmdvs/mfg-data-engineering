@@ -1,0 +1,1142 @@
+from pathlib import Path
+import base64
+import io
+from datetime import datetime
+
+import duckdb
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import matplotlib.dates as mdates
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DB_PATH   = REPO_ROOT / "data_source" / "oee_predmaint.duckdb"
+OUTPUT    = REPO_ROOT / "docs" / "reports" / "analytics_report.html"
+
+BENCHMARK_OEE = 0.85   # target OEE for this shop
+AP_TARGET     = 0.95   # target Availability and Performance implied by the OEE goal
+SHIFT_STARTUP_WINDOW_MIN = 45
+# Setup time above this multiple of the cohort median marks an operator as a
+# coaching candidate.
+SETUP_OUTLIER_RATIO = 1.20
+TYPE_ABBR = {"CNC Lathe": "cnc", "Vertical Mill": "vert", "Horizontal Mill": "hor"}
+
+
+def mlabel(machine_id, machine_type):
+    """Compact axis label: machine number plus a short machine-type tag, e.g.
+    MCH-011 (Horizontal Mill) -> '011(hor)'."""
+    return f"{machine_id.split('-')[1]}({TYPE_ABBR[machine_type]})"
+
+
+# Display labels for the raw CMMS failure codes (title case, OPERATOR_INDUCED
+# shortened to Operator), so charts read cleanly rather than in all caps.
+FAILURE_LABELS = {"TOOLING": "Tooling", "MECHANICAL": "Mechanical",
+                  "ELECTRICAL": "Electrical", "OPERATOR_INDUCED": "Operator",
+                  "ENVIRONMENTAL": "Environmental"}
+
+# ── Palette (BRIM house style) ───────────────────────────────────────────────
+DARK_GREY  = "#322B4B"   # document chrome: headers, titles, takeaways, dividers
+BG_GREY    = "#F3F5F7"   # box / card backgrounds
+DARK_BLUE  = "#381FA1"   # chart primary
+LIGHT_BLUE = "#54C0E8"   # chart secondary (used heavily)
+ACCENT_RED = "#CC0000"   # chart accent; conditional-formatting "bad" (low range)
+MUTED_RED  = "#FFA3A3"   # chart, secondary red
+GREEN      = "#00A84C"   # conditional-formatting "good" (high range)
+AMBER      = "#FFBA3F"   # conditional-formatting "medium" (mid range)
+MED_GREY   = "#8093A4"   # chart neutral
+LIGHT_GREY = "#D5DCE1"   # chart neutral
+TEXT       = "#000000"   # body font (black)
+
+CHART_W, CHART_H, CHART_DPI = 8.2, 3.8, 130
+BODY_FS, TITLE_FS = 11, 13
+TYPE_COLORS = {"CNC Lathe": DARK_BLUE, "Vertical Mill": LIGHT_BLUE, "Horizontal Mill": ACCENT_RED}
+
+plt.rcParams.update({
+    "figure.facecolor": "white", "axes.facecolor": "white",
+    "axes.edgecolor": "#D5DCE1", "axes.grid": False, "font.family": "sans-serif",
+    "font.size": BODY_FS, "axes.titlesize": TITLE_FS, "axes.titleweight": "bold",
+    "axes.labelsize": BODY_FS, "xtick.labelsize": BODY_FS, "ytick.labelsize": BODY_FS,
+    "legend.fontsize": BODY_FS, "figure.dpi": CHART_DPI,
+})
+
+
+def chart_style(ax):
+    ax.yaxis.grid(True, color="#D5DCE1", linestyle="-", linewidth=0.8)
+    ax.xaxis.grid(False)
+    ax.set_axisbelow(True)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    ax.spines["left"].set_color("#D5DCE1")
+    ax.spines["bottom"].set_color("#D5DCE1")
+
+
+def make_fig(h=None):
+    return plt.subplots(figsize=(CHART_W, h or CHART_H))
+
+
+def fig_to_b64(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=CHART_DPI)
+    buf.seek(0)
+    b = base64.b64encode(buf.read()).decode()
+    plt.close(fig)
+    return b
+
+
+def usd_short(x):
+    """Compact currency. Chooses K or M by how the value rounds, so a figure like
+    $999,942 reads as $1.0M rather than $1000K, and the unit stays appropriate as
+    numbers change."""
+    return f"${x / 1e6:.1f}M" if round(x / 1e3) >= 1000 else f"${x / 1e3:.0f}K"
+
+
+# ── Load marts ───────────────────────────────────────────────────────────────
+con = duckdb.connect(str(DB_PATH), read_only=True)
+# Ordered on load so sums and charts that sort on tied values come out the same
+# from build to build (the warehouse does not keep a row order).
+mp = con.execute("select * from mart_oee__machine_performance order by machine_id, period_date, shift").df()
+da = con.execute("select * from mart_oee__downtime_analysis order by downtime_key").df()
+pm = con.execute("select * from mart_oee__pm_compliance order by machine_id").df()
+rel = con.execute("select * from mart_oee__reliability order by machine_id").df()
+os_ = con.execute("select * from mart_oee__operator_setup order by operator_id desc").df()
+con.close()
+
+mp["period_month"] = pd.to_datetime(mp["period_month"])
+n_months     = mp["period_month"].dt.to_period("M").nunique()
+window_years = n_months / 12.0
+PERIOD_LABEL = f"{mp['period_month'].min():%b %Y}-{mp['period_month'].max():%b %Y}"
+TYPES = ["CNC Lathe", "Vertical Mill", "Horizontal Mill"]
+TYPE_BY_MACHINE = mp.groupby("machine_id")["machine_type"].first().to_dict()
+quality = float(mp["quality_rate"].iloc[0])
+
+
+def weighted_metrics(df):
+    a = df["run_minutes"].sum() / df["planned_production_minutes"].sum()
+    p = (df["performance"] * df["run_minutes"]).sum() / df["run_minutes"].sum()
+    return a, p, a * p * quality
+
+
+plant_avail, plant_perf, plant_oee = weighted_metrics(mp)
+by_type = {t: weighted_metrics(mp[mp["machine_type"] == t]) for t in TYPES}
+
+# Performance of the CNC lathes as a group versus the vertical and horizontal
+# mills combined, for the Performance deep dive.
+lathe_perf = by_type["CNC Lathe"][1]
+mills_perf = weighted_metrics(mp[mp["machine_type"].isin(["Vertical Mill", "Horizontal Mill"])])[1]
+lathe_vs_mills_pts = (lathe_perf - mills_perf) * 100
+
+mach = (mp.groupby(["machine_id", "machine_type", "machine_age_years", "is_aging_asset"])
+          .apply(lambda g: pd.Series({
+              "availability": g["run_minutes"].sum() / g["planned_production_minutes"].sum(),
+              "performance":  (g["performance"] * g["run_minutes"]).sum() / g["run_minutes"].sum(),
+              "run_hours":    g["run_minutes"].sum() / 60.0,
+          }), include_groups=False)
+          .reset_index())
+mach["oee"] = mach["availability"] * mach["performance"] * quality
+mach = mach.sort_values("oee")
+
+# ── OEE trend slopes by group (points per year) ──────────────────────────────
+def group_trends():
+    out = {}
+    monthly = (mp.groupby(["machine_type", "period_month"])
+                 .apply(lambda g: (g["run_minutes"].sum() / g["planned_production_minutes"].sum())
+                        * ((g["performance"] * g["run_minutes"]).sum() / g["run_minutes"].sum())
+                        * quality, include_groups=False)
+                 .reset_index(name="oee"))
+    for t, sub in monthly.groupby("machine_type"):
+        sub = sub.sort_values("period_month")
+        xi = np.arange(len(sub))
+        slope = np.polyfit(xi, sub["oee"], 1)[0] * 12 * 100
+        r = np.corrcoef(xi, sub["oee"])[0, 1]
+        out[t] = (slope, r)
+    return monthly, out
+
+
+trend_monthly, trend_stats = group_trends()
+max_abs_r = max(abs(r) for _, r in trend_stats.values())
+
+# ── Performance vs age ───────────────────────────────────────────────────────
+age_r     = np.corrcoef(mach["machine_age_years"], mach["performance"])[0, 1]
+age_slope = np.polyfit(mach["machine_age_years"], mach["performance"], 1)[0] * 100
+
+# Machine type at the same age: Performance on age and a lathe indicator.
+_X = np.column_stack([np.ones(len(mach)), mach["machine_age_years"], (mach["machine_type"] == "CNC Lathe").astype(float)])
+lathe_same_age_pts = float(np.linalg.lstsq(_X, mach["performance"] * 100, rcond=None)[0][2])
+
+# Daily Performance by machine (spindle-weighted, while running), and how far a
+# machine moves from one day to the next against the spread between machines.
+_run = mp[mp["run_minutes"] > 0]
+perf_daily = (_run.groupby(["machine_id", "period_date"])
+              .apply(lambda g: (g["performance"] * g["run_minutes"]).sum() / g["run_minutes"].sum(), include_groups=False)
+              .rename("performance").reset_index().sort_values(["machine_id", "period_date"]))
+day_move_pts  = float(perf_daily.groupby("machine_id")["performance"].diff().abs().median() * 100)
+fleet_gap_pts = float((mach["performance"].max() - mach["performance"].min()) * 100)
+
+# Within each machine: Shift A against Shift B, and the spread across operators.
+# The machine log carries the payroll number; the HR master gives the operator.
+perf_shift = (_run.groupby(["machine_id", "shift"])
+              .apply(lambda g: (g["performance"] * g["run_minutes"]).sum() / g["run_minutes"].sum(), include_groups=False)
+              .unstack() * 100)
+shift_max_diff = float((perf_shift["A"] - perf_shift["B"]).abs().max())
+MIN_OPERATOR_INTERVALS = 50
+_ev = pd.read_csv(REPO_ROOT / "data_source" / "raw" / "machinemetrics" / "production_events.csv",
+                  usecols=["machine_id", "machine_state", "operator_id", "spindle_utilization_pct"])
+_ev = _ev[(_ev["machine_state"] == "RUNNING") & _ev["spindle_utilization_pct"].notna()]
+_hr = pd.read_csv(REPO_ROOT / "data_source" / "raw" / "hr" / "operators.csv")[["operator_id", "employee_number"]]
+_ev = _ev.rename(columns={"operator_id": "employee_number"}).merge(_hr, on="employee_number")
+perf_operator = (_ev.groupby(["machine_id", "operator_id"])["spindle_utilization_pct"]
+                 .agg(intervals="size", performance="mean").reset_index())
+perf_operator = perf_operator[perf_operator["intervals"] >= MIN_OPERATOR_INTERVALS]
+_op_range = perf_operator.groupby("machine_id")["performance"].agg(lambda x: x.max() - x.min())
+operator_spread_pts, operator_spread_max = float(_op_range.median()), float(_op_range.max())
+
+# ── Opportunity to reach the 85% baseline ────────────────────────────────────
+cmms = da[da["source_system"] == "CMMS_REPAIR"]
+rate_by_type = mp.groupby("machine_type")["contribution_margin_per_hour"].first()
+rate_str = ", ".join(f"{t}s ${int(rate_by_type[t])}/hr" for t in TYPES)
+
+cost = mach.set_index("machine_id").copy()
+cost["cm"]          = cost["machine_type"].map(rate_by_type)
+cost["planned_hrs"] = mp.groupby("machine_id")["planned_production_minutes"].sum() / 60.0 / window_years
+cost["run_hrs"]     = cost["run_hours"] / window_years
+
+# Availability and performance loss magnitudes (versus a 100% ideal), used only
+# to split each machine's opportunity between the two controllable levers.
+cost["avail_loss"]  = cost["planned_hrs"] * (1 - cost["availability"]) * cost["cm"]
+cost["perf_loss"]   = cost["run_hrs"] * (1 - cost["performance"]) * cost["cm"]
+cost["share_avail"] = cost["avail_loss"] / (cost["avail_loss"] + cost["perf_loss"])
+
+# Opportunity to reach the 85% baseline, split additively into the two levers.
+cost["opp"]       = (BENCHMARK_OEE - cost["oee"]).clip(lower=0) * cost["planned_hrs"] * cost["cm"]
+cost["avail_opp"] = cost["opp"] * cost["share_avail"]
+cost["perf_opp"]  = cost["opp"] * (1 - cost["share_avail"])
+
+# Running hours lost to slow cycles: the gap between each machine's Performance
+# and the 95% target, as a share of its running time.
+cost["perf_lost_hrs"] = (cost["run_hrs"] * (AP_TARGET - cost["performance"])).clip(lower=0)
+perf_lost_hours_annual = float(cost["perf_lost_hrs"].sum())
+aging_perf_share = float(cost.loc[cost["is_aging_asset"], "perf_opp"].sum() / cost["perf_opp"].sum())
+lathe_perf_share = float(cost.loc[cost["machine_type"] == "CNC Lathe", "perf_opp"].sum() / cost["perf_opp"].sum())
+n_lathes = int((cost["machine_type"] == "CNC Lathe").sum())
+
+opportunity_annual = cost["opp"].sum()
+avail_opp_annual   = cost["avail_opp"].sum()
+perf_opp_annual    = cost["perf_opp"].sum()
+reactive_repair_annual = cmms["downtime_cost"].sum() / window_years
+unplanned_hours_annual = cmms["downtime_hours"].sum() / window_years
+
+# Aging (>9 yr) versus the rest of the fleet, rolled up the same time-weighted way
+# as the plant metrics. Used in the executive summary to size the oldest machines
+# as the single largest driver of the OEE miss, on both levers.
+aging_avail, aging_perf, aging_oee = weighted_metrics(mp[mp["is_aging_asset"]])
+newer_avail, newer_perf, newer_oee = weighted_metrics(mp[~mp["is_aging_asset"]])
+avail_gap_pts = (newer_avail - aging_avail) * 100
+perf_gap_pts  = (newer_perf - aging_perf) * 100
+oee_gap_pts   = (newer_oee - aging_oee) * 100
+# Rounded to whole points, half rounded up (so a 4.5-point gap reads as 5, not 4).
+oee_gap_r   = int(np.floor(oee_gap_pts + 0.5))
+avail_gap_r = int(np.floor(avail_gap_pts + 0.5))
+perf_gap_r  = int(np.floor(perf_gap_pts + 0.5))
+aging_opp_share = cost.loc[cost["is_aging_asset"], "opp"].sum() / opportunity_annual
+n_aging_assets  = int(mp[mp["is_aging_asset"]]["machine_id"].nunique())
+n_fleet         = int(mp["machine_id"].nunique())
+
+# Component targets implied by an 85% composite OEE. Because OEE = A x P x Q,
+# reaching 85% does not mean A and P each hit 85%. Holding quality at its
+# assumption and the current availability-to-performance balance, both must rise
+# so that A x P = benchmark / quality.
+_required_ap  = BENCHMARK_OEE / quality
+_scale        = (_required_ap / (plant_avail * plant_perf)) ** 0.5
+implied_avail = plant_avail * _scale
+implied_perf  = plant_perf * _scale
+
+# ── Within-machine PM-overdue vs alarm rate (controls for machine identity) ──
+# Comparing each machine against itself isolates the PM effect from age, which
+# otherwise confounds a cross-machine comparison (older machines both fail more
+# and fall behind on PM). Overdue windows are the spans when a machine is more
+# than the threshold past a scheduled PM, read from the CMMS.
+import datetime as _dt
+PM_OVERDUE_THRESHOLD_DAYS = 14
+_maint = pd.read_csv(REPO_ROOT / "data_source" / "raw" / "cmms" / "maintenance_records.csv")
+_pmrec = _maint[(_maint["maintenance_type"] == "PLANNED_PM")
+                & _maint["pm_scheduled_date"].notna() & _maint["days_overdue"].notna()]
+overdue_windows = {m: [] for m in mp["machine_id"].unique()}
+for _, _r in _pmrec.iterrows():
+    if _r["days_overdue"] <= PM_OVERDUE_THRESHOLD_DAYS:
+        continue
+    _s = pd.to_datetime(_r["pm_scheduled_date"]).date()
+    _c = pd.to_datetime(_r["pm_completed_date"]).date()
+    overdue_windows[_r["machine_id"]].append((_s + _dt.timedelta(days=PM_OVERDUE_THRESHOLD_DAYS), _c))
+
+
+def _in_overdue(machine_id, d):
+    return any(a <= d < b for a, b in overdue_windows.get(machine_id, []))
+
+
+_daily = (mp.groupby(["machine_id", "period_date"])
+          .agg(alarm_events=("alarm_events", "sum"), run_minutes=("run_minutes", "sum"))
+          .reset_index())
+_daily["date"]    = pd.to_datetime(_daily["period_date"]).dt.date
+_daily["overdue"] = [_in_overdue(m, d) for m, d in zip(_daily["machine_id"], _daily["date"])]
+
+
+def _paired_rates(g):
+    ov, cu = g[g["overdue"]], g[~g["overdue"]]
+    r_ov = (ov["alarm_events"].sum() / (ov["run_minutes"].sum() / 60.0) * 1000
+            if ov["run_minutes"].sum() else np.nan)
+    r_cu = (cu["alarm_events"].sum() / (cu["run_minutes"].sum() / 60.0) * 1000
+            if cu["run_minutes"].sum() else np.nan)
+    return pd.Series({"rate_current": r_cu, "rate_overdue": r_ov})
+
+
+pm_within = _daily.groupby("machine_id").apply(_paired_rates, include_groups=False).dropna()
+pm_within = pm_within.join(pm.set_index("machine_id")["is_aging_asset"])
+pm_overdue_multiple = float((pm_within["rate_overdue"] / pm_within["rate_current"]).mean())
+
+# Shift-start stoppage lift. The startup window is 45 of every 480 shift minutes,
+# so if stoppages were spread evenly it would hold that same share of them. The
+# lift is how far above that even share the window actually runs, and it is read
+# per shift because the pattern belongs to both crews.
+_sd = da[(da["source_system"] == "MACHINE_STATE") & da["minute_of_shift"].notna()]
+_even_share = SHIFT_STARTUP_WINDOW_MIN / 480.0
+
+
+def _startup_lift(sub):
+    return ((sub["is_shift_startup"] == True).mean() / _even_share) if len(sub) else float("nan")
+
+
+startup_lift    = _startup_lift(_sd)
+startup_lift_a  = _startup_lift(_sd[_sd["shift"] == "A"])
+startup_lift_b  = _startup_lift(_sd[_sd["shift"] == "B"])
+
+# Alarm-rate exposure of the aging assets against the rest of the fleet, read per
+# 1,000 running hours so busy and idle machines compare fairly. Used to state the
+# gap as an exact multiple rather than a vague "several times".
+_alarms = mp.groupby("machine_id")["alarm_events"].sum()
+_runhrs = mp.groupby("machine_id")["run_minutes"].sum() / 60.0
+_arate  = (_alarms / _runhrs * 1000)
+_aging_flag = pm.set_index("machine_id")["is_aging_asset"].reindex(_arate.index).fillna(False)
+aging_alarm_rate     = float(_arate[_aging_flag.values].mean())
+nonaging_alarm_rate  = float(_arate[~_aging_flag.values].mean())
+aging_alarm_multiple = aging_alarm_rate / nonaging_alarm_rate
+
+# Interval service completed before failure, by machine: the interval services
+# carried out, over the same plus every unplanned failure that came after the
+# machine's repair interval had been reached and before a service was carried
+# out. A repair of either kind restarts the count of days.
+_rep = (da[da["source_system"].isin(["CMMS_REPAIR", "CMMS_INTERVAL_SERVICE"])]
+        .sort_values(["machine_id", "event_timestamp"]).copy())
+_rep["days_since"] = (pd.to_datetime(_rep["event_date"])
+                      - pd.to_datetime(_rep.groupby("machine_id")["event_date"].shift())).dt.days
+_rep["interval"] = _rep["machine_id"].map(rel.set_index("machine_id")["repair_interval_days"])
+_late = _rep[(_rep["source_system"] == "CMMS_REPAIR") & (_rep["days_since"] >= _rep["interval"])]
+_svc = _rep[_rep["source_system"] == "CMMS_INTERVAL_SERVICE"]
+svc_before = pd.DataFrame({"services": _svc.groupby("machine_id").size(),
+                           "late_failures": _late.groupby("machine_id").size()}).reindex(pm["machine_id"]).fillna(0)
+svc_before["pct"] = svc_before["services"] / (svc_before["services"] + svc_before["late_failures"]) * 100
+svc_before_fleet = float(svc_before["services"].sum() / (svc_before["services"].sum() + svc_before["late_failures"].sum()) * 100)
+n_late_failures = int(svc_before["late_failures"].sum())
+# Unplanned repair hours on those failures, less the hours an interval service
+# takes on the same machine at its average, a year.
+_svc_avg = _svc.groupby("machine_id")["downtime_hours"].mean()
+late_failure_excess_hours = float((_late["downtime_hours"] - _late["machine_id"].map(_svc_avg)).sum()) / window_years
+# Alarm hours above the current-PM rate while more than the threshold past a due
+# calendar PM: overdue run hours x (overdue rate - current rate), by machine, a year.
+_dalarm = (mp.assign(alarm_min=mp["planned_production_minutes"] - mp["run_minutes"] - mp["setup_minutes"]
+                     - mp["idle_minutes"] - mp["unplanned_down_minutes"])
+           .groupby(["machine_id", "period_date"]).agg(alarm_min=("alarm_min", "sum"), run_min=("run_minutes", "sum")).reset_index())
+_dalarm["overdue"] = [_in_overdue(m, d) for m, d in zip(_dalarm["machine_id"], pd.to_datetime(_dalarm["period_date"]).dt.date)]
+_ah = _dalarm.groupby(["machine_id", "overdue"])[["alarm_min", "run_min"]].sum().unstack("overdue")
+_rate_cur = _ah[("alarm_min", False)] / _ah[("run_min", False)]
+_rate_ovd = _ah[("alarm_min", True)] / _ah[("run_min", True)]
+overdue_alarm_excess_hours = float(((_ah[("run_min", True)] / 60.0) * (_rate_ovd - _rate_cur)).fillna(0).sum()) / window_years
+# Average downtime per event by kind of maintenance.
+avg_event_hours = da[da["source_system"].str.startswith("CMMS")].groupby("source_system")["downtime_hours"].mean().to_dict()
+
+# The shop's planned work beside its unplanned repairs, a year.
+PM_INTERVAL_DAYS = 42
+_per_year = lambda src: (len(da[da["source_system"] == src]) / window_years,
+                         float(da.loc[da["source_system"] == src, "downtime_hours"].sum()) / window_years)
+interval_services_annual, interval_hours_annual = _per_year("CMMS_INTERVAL_SERVICE")
+calendar_pms_annual, calendar_pm_hours_annual   = _per_year("CMMS_CALENDAR_PM")
+unplanned_repairs_annual = len(cmms) / window_years
+_svc_by_code = (da[da["source_system"] == "CMMS_INTERVAL_SERVICE"].groupby("failure_code")["downtime_hours"].sum() / window_years)
+
+# Lost Availability by component, hours a year, from the machine-state log.
+_lost_total = (mp["planned_production_minutes"].sum() - mp["run_minutes"].sum()) / 60.0 / window_years
+lost_avail = {"unplanned": mp["unplanned_down_minutes"].sum() / 60.0 / window_years,
+              "idle":      mp["idle_minutes"].sum() / 60.0 / window_years,
+              "setup":     mp["setup_minutes"].sum() / 60.0 / window_years}
+lost_avail["alarm"] = _lost_total - sum(lost_avail.values())
+_tens = lambda v: f"{round(v / 10) * 10:,.0f}"
+
+# Unplanned repair hours by failure mode.
+_code_hours = cmms.groupby("failure_code")["downtime_hours"].sum().sort_values(ascending=False) / window_years
+_tool               = cmms[cmms["failure_code"] == "TOOLING"]
+tooling_pct         = float(_tool["downtime_hours"].sum() / cmms["downtime_hours"].sum() * 100)
+tooling_cost_annual = float(_tool["downtime_cost"].sum()) / window_years
+mechanical_pct      = float(cmms.loc[cmms["failure_code"] == "MECHANICAL", "downtime_hours"].sum() / cmms["downtime_hours"].sum() * 100)
+
+# ── Recommended-action impact estimates (annual, from the regenerated data) ──
+cm_blended = float((cost["cm"] * cost["run_hrs"]).sum() / cost["run_hrs"].sum())
+
+# 1. Shift-start: unplanned-down cost in the startup window above a uniform-time
+#    expectation (the window is 45 of every 480 shift minutes).
+_ms = da[da["source_system"] == "MACHINE_STATE"]
+_startup_share = SHIFT_STARTUP_WINDOW_MIN / 480.0
+shift_impact = max(_ms.loc[_ms["is_shift_startup"] == True, "downtime_cost"].sum()
+                   - _ms["downtime_cost"].sum() * _startup_share, 0.0) / window_years
+
+# 2. Setup standardisation: excess setup hours from the flagged operators, priced
+#    at the blended plant contribution margin.
+_sf = os_[os_["setup_ratio_vs_cohort"] >= SETUP_OUTLIER_RATIO]
+setup_ratio_mean = float(_sf["setup_ratio_vs_cohort"].mean())
+setup_gap_hours  = float(((_sf["median_setup_hours"] - _sf["cohort_median_setup_hours"])
+                          * _sf["total_jobs"]).sum())
+setup_impact = setup_gap_hours / window_years * cm_blended
+
+# 3. PM catch-up: reactive-repair cost incurred while materially past a due PM.
+_cmms2 = cmms.copy()
+_cmms2["date"]    = pd.to_datetime(_cmms2["event_date"]).dt.date
+_cmms2["overdue"] = [_in_overdue(m, d) for m, d in zip(_cmms2["machine_id"], _cmms2["date"])]
+pm_impact = float(_cmms2.loc[_cmms2["overdue"], "downtime_cost"].sum()) / window_years
+
+# 4. Tooling program: recoverable share of tooling reactive-repair cost.
+TOOLING_RECOVERABLE_SHARE = 0.40
+tooling_impact = tooling_cost_annual * TOOLING_RECOVERABLE_SHARE
+
+# 5. Reliability review (rebuild versus replace) for the two worst aging assets:
+#    their availability-side opportunity, the unplanned downtime a more reliable
+#    machine would avoid.
+_aging2 = [m for m in ["MCH-011", "MCH-007"] if m in cost.index]
+reliability_impact = float(cost.loc[_aging2, "avail_opp"].sum())
+
+# 6. Spindle rebuild and control retrofit on the oldest machines (>9 years): the
+#    performance-side opportunity on those assets, recovered by restoring cycle
+#    speed. Held separate from the reliability item above (availability lever) so
+#    the two capital actions do not double-count the same dollars.
+_aging_old = list(cost.index[cost["is_aging_asset"]])
+spindle_impact = float(cost.loc[_aging_old, "perf_opp"].sum())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHARTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def chart_machine_ranking():
+    fig, ax = make_fig(h=4.4)
+    labels = [mlabel(m, t) for m, t in zip(mach["machine_id"], mach["machine_type"])]
+    colors = [ACCENT_RED if aging else DARK_BLUE for aging in mach["is_aging_asset"]]
+    ax.barh(labels, mach["oee"] * 100, color=colors, height=0.65)
+    bl = ax.axvline(BENCHMARK_OEE * 100, color="#8093A4", linestyle="--", linewidth=1.4)
+    for y, v in enumerate(mach["oee"]):
+        ax.text(v * 100 + 0.6, y, f"{v:.0%}", va="center", fontsize=BODY_FS, color=TEXT)
+    ax.set_xlabel("OEE (%)"); ax.set_xlim(0, 100)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    handles = [plt.Rectangle((0, 0), 1, 1, color=ACCENT_RED),
+               plt.Rectangle((0, 0), 1, 1, color=DARK_BLUE)]
+    ax.legend(handles + [bl],
+              ["Aging asset (>9 yrs)", "Remaining machines", f"Baseline ({BENCHMARK_OEE:.0%})"],
+              loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3,
+              fontsize=BODY_FS, frameon=False)
+    chart_style(ax); ax.xaxis.grid(True, color="#D5DCE1"); ax.yaxis.grid(False)
+    plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_oee_trend():
+    fig, ax = make_fig()
+    for grp, sub in trend_monthly.groupby("machine_type"):
+        sub = sub.sort_values("period_month")
+        ax.plot(sub["period_month"], sub["oee"] * 100, marker="o", markersize=3,
+                linewidth=1.8, color=TYPE_COLORS.get(grp, MED_GREY), label=grp)
+    ax.axhline(BENCHMARK_OEE * 100, color=MED_GREY, linestyle=":", linewidth=1.3)
+    lines = "\n".join(f"{TYPE_ABBR[t]:>5}: {trend_stats[t][0]:+.2f} pts/yr  (r={trend_stats[t][1]:+.2f})"
+                      for t in TYPES)
+    ax.text(0.015, 0.04, "12-mo OEE trend:\n" + lines, transform=ax.transAxes,
+            fontsize=BODY_FS, va="bottom", ha="left", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="#D5DCE1"))
+    ax.set_ylabel("OEE (%)"); ax.set_ylim(30, 95)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax.xaxis.set_major_locator(mdates.MonthLocator(bymonth=(1, 5, 9)))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
+    ax.legend(fontsize=BODY_FS, ncol=3, loc="upper center",
+              bbox_to_anchor=(0.5, -0.14), frameon=False)
+    chart_style(ax); plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_components_by_type():
+    x = np.arange(len(TYPES)); w = 0.35
+    fig, ax = make_fig()
+    avail = [by_type[t][0] * 100 for t in TYPES]
+    perf  = [by_type[t][1] * 100 for t in TYPES]
+    ax.bar(x - w / 2, avail, w, color=DARK_BLUE, label="Availability")
+    ax.bar(x + w / 2, perf, w, color=LIGHT_BLUE, label="Performance")
+    for i, t in enumerate(TYPES):
+        ax.text(i - w / 2, avail[i] + 1.2, f"{avail[i]:.0f}%", ha="center", va="bottom", fontsize=BODY_FS)
+        ax.text(i + w / 2, perf[i] + 1.2, f"{perf[i]:.0f}%", ha="center", va="bottom", fontsize=BODY_FS)
+        ax.text(i, max(avail[i], perf[i]) + 7, f"OEE {by_type[t][2]:.0%}",
+                ha="center", fontsize=BODY_FS, fontweight="bold", color=TEXT)
+    ax.set_xticks(x); ax.set_xticklabels(TYPES)
+    ax.set_ylabel("(%)"); ax.set_ylim(0, 108)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax.legend(fontsize=BODY_FS, loc="lower left")
+    chart_style(ax); plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_planned_time():
+    months = sorted(mp["period_month"].unique())[-6:]
+    fig, axes = plt.subplots(1, 3, figsize=(9.8, 4.3), sharey=True)
+    plt.subplots_adjust(wspace=0.08)
+    for ax, t in zip(axes, TYPES):
+        d = mp[(mp["machine_type"] == t) & (mp["period_month"].isin(months))]
+        g = d.groupby("period_month")
+        planned    = g["planned_production_minutes"].sum().reindex(months)
+        run        = g["run_minutes"].sum().reindex(months)
+        productive = g.apply(lambda x: (x["performance"] * x["run_minutes"]).sum(),
+                             include_groups=False).reindex(months)
+        prod       = (productive / planned * 100).values
+        perf_loss  = ((run - productive) / planned * 100).values
+        avail_loss = ((planned - run) / planned * 100).values
+        xi = np.arange(len(months))
+        ax.bar(xi, prod, width=0.8, color=DARK_BLUE, label="Productive")
+        ax.bar(xi, avail_loss, bottom=prod, width=0.8, color=MED_GREY, label="Availability loss")
+        ax.bar(xi, perf_loss, bottom=prod + avail_loss, width=0.8, color=ACCENT_RED, label="Performance loss")
+        # Percent centred in each segment. White reads on the dark-blue and red
+        # fills, black on the grey.
+        for xpos, (pv, alv, plv) in enumerate(zip(prod, avail_loss, perf_loss)):
+            if pv >= 8:
+                ax.text(xpos, pv / 2, f"{pv:.0f}%", ha="center", va="center",
+                        fontsize=BODY_FS, color="white")
+            if alv >= 8:
+                ax.text(xpos, pv + alv / 2, f"{alv:.0f}%", ha="center", va="center",
+                        fontsize=BODY_FS, color=TEXT)
+            if plv >= 8:
+                ax.text(xpos, pv + alv + plv / 2, f"{plv:.0f}%", ha="center", va="center",
+                        fontsize=BODY_FS, color="white")
+        ax.set_title(t, fontsize=BODY_FS, fontweight="bold")
+        ax.set_ylim(0, 100); ax.set_xlim(-0.6, len(months) - 0.4)
+        ax.set_xticks(range(len(months)))
+        ax.set_xticklabels([pd.Timestamp(mo).strftime("%b'%y") for mo in months],
+                           rotation=40, ha="right", fontsize=BODY_FS - 1)
+        chart_style(ax)
+    axes[0].set_ylabel("(% of planned time)")
+    axes[0].yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, ncol=3, loc="lower center", bbox_to_anchor=(0.5, -0.08),
+               frameon=False, fontsize=BODY_FS)
+    plt.tight_layout(rect=(0, 0.07, 1, 1))
+    return fig_to_b64(fig)
+
+
+def chart_failure_pareto():
+    p = cmms.groupby("failure_code")["downtime_hours"].sum().sort_values(ascending=False)
+    pct_cum = p.cumsum() / p.sum() * 100
+    fig, ax = make_fig()
+    ax.bar(range(len(p)), p.values, color=DARK_BLUE, width=0.6)
+    ax.set_xticks(range(len(p)))
+    ax.set_xticklabels([FAILURE_LABELS.get(c, c.title()) for c in p.index], rotation=20, ha="right")
+    ax.set_ylabel("Unplanned Downtime (hrs)"); ax.set_ylim(0, p.max() * 1.18)
+    ax2 = ax.twinx()
+    ax2.plot(range(len(p)), pct_cum.values, color=ACCENT_RED, marker="o", linewidth=1.8)
+    ax2.set_ylim(0, 108); ax2.set_ylabel("Cumulative %", color=ACCENT_RED)
+    ax2.tick_params(axis="y", colors=ACCENT_RED)
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    # A cumulative label that falls inside its bar is drawn in white so it reads against the bar.
+    ymax = p.max() * 1.18
+    for i, v in enumerate(pct_cum.values):
+        inside = (v / 108 + 0.06) < p.values[i] / ymax
+        ax2.annotate(f"{v:.0f}%", (i, v), textcoords="offset points", xytext=(0, 8),
+                     ha="center", fontsize=BODY_FS, color="white" if inside else ACCENT_RED,
+                     fontweight="bold" if inside else "normal")
+    for i, v in enumerate(p.values):
+        ax.text(i, v + p.max() * 0.02, f"{v:,.0f}", ha="center", fontsize=BODY_FS)
+    chart_style(ax); ax2.grid(False)
+    plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_time_of_day():
+    """Count of unplanned-down stoppages that begin in each 15-minute window."""
+    st = da[(da["source_system"] == "MACHINE_STATE") & da["minute_of_shift"].notna()]
+    BIN, SHIFT_MIN = 15, 480
+    nbins = SHIFT_MIN // BIN
+    counts = {"A": np.zeros(nbins), "B": np.zeros(nbins)}
+    for shift, start in zip(st["shift"], st["minute_of_shift"]):
+        b = int(start) // BIN
+        if 0 <= b < nbins and shift in counts:
+            counts[shift][b] += 1
+    centers = np.arange(0, SHIFT_MIN, BIN) + BIN / 2
+    fig, ax = make_fig()
+    for shift, color, lbl in [("A", LIGHT_BLUE, "Shift A"), ("B", DARK_BLUE, "Shift B")]:
+        ax.plot(centers, counts[shift], marker="o", markersize=3, linewidth=1.8, color=color, label=lbl)
+    ax.axvspan(0, SHIFT_STARTUP_WINDOW_MIN, color=ACCENT_RED, alpha=0.10)
+    _ylo, _yhi = ax.get_ylim()
+    ax.text(SHIFT_STARTUP_WINDOW_MIN / 2, _ylo + (_yhi - _ylo) * 0.03, "Startup\nwindow",
+            ha="center", va="bottom", fontsize=BODY_FS, color=ACCENT_RED, fontweight="bold")
+    ax.set_xlabel("Minutes into shift"); ax.set_ylabel("Unplanned stoppages (count)")
+    ax.legend(fontsize=BODY_FS, ncol=2, loc="upper center",
+              bbox_to_anchor=(0.5, -0.16), frameon=False)
+    chart_style(ax); plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_pm_completion():
+    """On-time maintenance by machine, one row a machine, sorted by calendar PM on
+    time: calendar PM completed on time, and interval service completed before
+    the failure. Fleet values are in the legend."""
+    d = pm[["machine_id", "pct_ontime"]].set_index("machine_id").join(svc_before["pct"]).sort_values("pct_ontime")
+    y = np.arange(len(d))
+    fig, ax = make_fig(h=4.6)
+    ax.hlines(y, np.minimum(d["pct_ontime"], d["pct"]), np.maximum(d["pct_ontime"], d["pct"]), color=LIGHT_GREY, linewidth=2, zorder=1)
+    ax.scatter(d["pct_ontime"], y, s=70, color=DARK_BLUE, zorder=3,
+               label=f"Calendar PM on time (fleet {pm['pct_ontime'].mean():.0f}%)")
+    ax.scatter(d["pct"], y, s=70, color=ACCENT_RED, marker="D", zorder=3,
+               label=f"Interval service completed before failure (fleet {svc_before_fleet:.0f}%)")
+    for yi, (a, b) in enumerate(zip(d["pct_ontime"], d["pct"])):
+        ax.text(a - 1.5, yi, f"{a:.0f}%", ha="right", va="center", fontsize=8, color=DARK_BLUE)
+        ax.text(b + 1.5, yi, f"{b:.0f}%", ha="left", va="center", fontsize=8, color=ACCENT_RED)
+    ax.set_yticks(y); ax.set_yticklabels([mlabel(m, TYPE_BY_MACHINE[m]) for m in d.index])
+    ax.set_xlim(min(d["pct_ontime"].min(), d["pct"].min()) - 8, 106)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax.set_xlabel("Share of occasions")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.14), ncol=2, fontsize=BODY_FS, frameon=False)
+    chart_style(ax); ax.xaxis.grid(True, color=LIGHT_GREY); ax.yaxis.grid(False)
+    plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_perf_vs_age():
+    fig, ax = make_fig()
+    for t in TYPES:
+        d = mach[mach["machine_type"] == t]
+        ax.scatter(d["machine_age_years"], d["performance"] * 100, color=TYPE_COLORS[t], s=70,
+                   edgecolor="white", zorder=3, label=t)
+    for _, r in mach.iterrows():
+        if r["is_aging_asset"]:
+            ax.annotate(r["machine_id"], (r["machine_age_years"], r["performance"] * 100),
+                        textcoords="offset points", xytext=(6, 4), fontsize=BODY_FS, color=TEXT)
+    z = np.polyfit(mach["machine_age_years"], mach["performance"] * 100, 1)
+    xs = np.linspace(mach["machine_age_years"].min(), mach["machine_age_years"].max(), 20)
+    ax.plot(xs, np.polyval(z, xs), color=MED_GREY, linestyle="--", linewidth=1.5, label="Fitted line")
+    ax.set_xlabel("Machine age (years)"); ax.set_ylabel("Performance (%)")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=4, fontsize=BODY_FS, frameon=False)
+    chart_style(ax); plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_perf_daily():
+    """Box per machine of daily Performance, ordered by machine age."""
+    order = mach.sort_values(["machine_age_years", "machine_id"])
+    data = [perf_daily.loc[perf_daily["machine_id"] == m, "performance"].values * 100 for m in order["machine_id"]]
+    fig, ax = make_fig(h=4.2)
+    bp = ax.boxplot(data, patch_artist=True, widths=0.6, showfliers=False,
+                    medianprops=dict(color="white", linewidth=1.6),
+                    whiskerprops=dict(color=MED_GREY), capprops=dict(color=MED_GREY))
+    for box, aging in zip(bp["boxes"], order["is_aging_asset"]):
+        box.set(facecolor=ACCENT_RED if aging else DARK_BLUE, edgecolor="none")
+    fleet = float(perf_daily["performance"].median() * 100)
+    l1 = ax.axhline(fleet, color=MED_GREY, linestyle="--", linewidth=1.4)
+    l2 = ax.axhline(AP_TARGET * 100, color=GREEN, linestyle="--", linewidth=1.4)
+    ax.set_xticks(range(1, len(order) + 1))
+    ax.set_xticklabels([f"{m.split('-')[1]}\n{int(a)} yrs" for m, a in
+                        zip(order["machine_id"], order["machine_age_years"])], fontsize=BODY_FS - 1)
+    ax.set_ylabel("Daily Performance (%)"); ax.set_ylim(60, 100)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    handles = [plt.Rectangle((0, 0), 1, 1, color=ACCENT_RED), plt.Rectangle((0, 0), 1, 1, color=DARK_BLUE), l1, l2]
+    ax.legend(handles, ["Aging asset (>9 yrs)", "Remaining machines", f"Fleet median ({fleet:.0f}%)", f"Target ({AP_TARGET:.0%})"],
+              loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=4, fontsize=BODY_FS - 1, frameon=False, columnspacing=1.0)
+    chart_style(ax); plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_perf_within():
+    """Two panels, per machine: Shift A against Shift B, and the spread across operators."""
+    order = list(mach.sort_values(["machine_age_years", "machine_id"])["machine_id"])
+    labels = [m.split('-')[1] for m in order]
+    x = np.arange(len(order))
+    fig, (ax, ax2) = plt.subplots(1, 2, figsize=(CHART_W, 3.9), sharey=True)
+    ax.scatter(x - 0.12, perf_shift.loc[order, "A"], color=LIGHT_BLUE, s=38, zorder=3, label="Shift A")
+    ax.scatter(x + 0.12, perf_shift.loc[order, "B"], color=DARK_BLUE, s=38, zorder=3, label="Shift B")
+    ax.set_title("By shift", fontsize=BODY_FS, fontweight="bold", color=DARK_GREY)
+    ax.set_ylabel("Performance (%)")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.24), ncol=2, fontsize=BODY_FS - 1, frameon=False)
+    for i, m in enumerate(order):
+        v = perf_operator.loc[perf_operator["machine_id"] == m, "performance"]
+        ax2.vlines(i, v.min(), v.max(), color=MED_GREY, linewidth=1.2, zorder=2)
+        ax2.scatter([i] * len(v), v, color=DARK_BLUE, s=12, alpha=0.7, zorder=3, label="One operator" if i == 0 else None)
+    ax2.set_title("By operator", fontsize=BODY_FS, fontweight="bold", color=DARK_GREY)
+    ax2.legend(loc="upper center", bbox_to_anchor=(0.5, -0.24), ncol=1, fontsize=BODY_FS - 1, frameon=False)
+    for a in (ax, ax2):
+        a.set_xticks(x); a.set_xticklabels(labels, fontsize=BODY_FS - 2)
+        a.set_ylim(70, 95); a.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+        chart_style(a)
+    plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_perf_loss():
+    """Pareto of running hours lost to Performance by machine, with the margin
+    Section 5 puts on each."""
+    d = cost.sort_values("perf_lost_hrs", ascending=False)
+    x = np.arange(len(d))
+    fig, ax = make_fig(h=4.2)
+    ax.bar(x, d["perf_lost_hrs"], color=[ACCENT_RED if a else DARK_BLUE for a in d["is_aging_asset"]], width=0.82)
+    top = d["perf_lost_hrs"].max()
+    for i, (h, m) in enumerate(zip(d["perf_lost_hrs"], d["perf_opp"])):
+        ax.text(i, top * 0.02, f"{h:,.0f} h\n{usd_short(m)}", ha="center", va="bottom", fontsize=BODY_FS - 2, color="white")
+    ax.set_xticks(x); ax.set_xticklabels([m.split('-')[1] for m in d.index])
+    ax.set_ylabel("Running hours lost per year"); ax.set_ylim(0, top * 1.15)
+    ax2 = ax.twinx()
+    ax2.plot(x, d["perf_lost_hrs"].cumsum() / d["perf_lost_hrs"].sum() * 100, color=MED_GREY, marker="o", markersize=4, linewidth=1.6)
+    # the cumulative line is lifted clear of the labels at the foot of each bar
+    ax2.set_ylim(-30, 115); ax2.set_yticks([0, 25, 50, 75, 100]); ax2.set_ylabel("Cumulative share of hours")
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    handles = [plt.Rectangle((0, 0), 1, 1, color=ACCENT_RED), plt.Rectangle((0, 0), 1, 1, color=DARK_BLUE)]
+    ax.legend(handles, ["Aging asset (>9 yrs)", "Remaining machines"], loc="upper center",
+              bbox_to_anchor=(0.5, -0.22), ncol=2, fontsize=BODY_FS, frameon=False)
+    chart_style(ax); ax2.grid(False); ax2.spines["top"].set_visible(False)
+    plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_operator_setup():
+    d = os_.sort_values("median_setup_hours", ascending=True)
+    cohort = float(d["cohort_median_setup_hours"].iloc[0])
+    colors = [ACCENT_RED if r >= SETUP_OUTLIER_RATIO else DARK_BLUE for r in d["setup_ratio_vs_cohort"]]
+    fig, ax = make_fig(h=4.4)
+    ax.barh(d["operator_id"], d["median_setup_hours"], color=colors, height=0.65)
+    ax.axvline(cohort, color=MED_GREY, linestyle="--", linewidth=1.4,
+               label=f"Cohort median ({cohort:.2f} h)")
+    # Every bar carries its actual setup time; the flagged operators also carry
+    # their multiple of the cohort median.
+    for y, (v, ratio) in enumerate(zip(d["median_setup_hours"], d["setup_ratio_vs_cohort"])):
+        label = f"{v:.2f} h" + (f"  ({ratio:.1f}x)" if ratio >= SETUP_OUTLIER_RATIO else "")
+        colour = ACCENT_RED if ratio >= SETUP_OUTLIER_RATIO else TEXT
+        ax.text(v + 0.01, y, label, va="center", fontsize=BODY_FS, color=colour,
+                fontweight="bold" if ratio >= SETUP_OUTLIER_RATIO else "normal")
+    ax.set_xlim(0, d["median_setup_hours"].max() * 1.30)
+    ax.set_xlabel("Median setup hours per job")
+    ax.legend(loc="lower right", fontsize=BODY_FS)
+    chart_style(ax); ax.xaxis.grid(True, color="#D5DCE1"); ax.yaxis.grid(False)
+    plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_opportunity_by_machine():
+    d = cost.sort_values("opp", ascending=False)
+    fig, ax = make_fig(h=4.0)
+    x = range(len(d))
+    avail_k, perf_k, opp_k = d["avail_opp"] / 1000, d["perf_opp"] / 1000, d["opp"] / 1000
+    ax.bar(x, avail_k, color=DARK_BLUE, width=0.8, label="Availability")
+    ax.bar(x, perf_k, bottom=avail_k, color=LIGHT_BLUE, width=0.8, label="Performance")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([mlabel(m, TYPE_BY_MACHINE[m]) for m in d.index], rotation=45, ha="right")
+    ax.set_ylabel("Margin Uplift Opportunity ($K)")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
+    # Total above each bar, plus each lever's own share inside its segment. White
+    # reads on the dark blue, black on the light blue.
+    for i, (a, p, t) in enumerate(zip(avail_k, perf_k, opp_k)):
+        ax.text(i, t + opp_k.max() * 0.02, f"${t:,.0f}K", ha="center", va="bottom",
+                fontsize=9, color=TEXT)
+        if a > opp_k.max() * 0.08:
+            ax.text(i, a / 2, f"${a:,.0f}K", ha="center", va="center",
+                    fontsize=9, color="white")
+        if p > opp_k.max() * 0.08:
+            ax.text(i, a + p / 2, f"${p:,.0f}K", ha="center", va="center",
+                    fontsize=9, color=TEXT)
+    ax.set_ylim(0, opp_k.max() * 1.20)
+    ax.legend(fontsize=BODY_FS, loc="upper center", bbox_to_anchor=(0.5, -0.22),
+              ncol=2, frameon=False)
+    chart_style(ax); plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_opportunity_bar():
+    """Single left-to-right stacked bar: the annual margin opportunity split into
+    its Availability and Performance components, with the total called out."""
+    a, p, tot = avail_opp_annual, perf_opp_annual, opportunity_annual
+    fig, ax = plt.subplots(figsize=(CHART_W, 1.5))
+    ax.barh(0, a, color=DARK_BLUE)
+    ax.barh(0, p, left=a, color=LIGHT_BLUE)
+    ax.text(a / 2, 0, f"Availability\n{usd_short(a)}", ha="center", va="center",
+            color="white", fontsize=BODY_FS, fontweight="bold")
+    ax.text(a + p / 2, 0, f"Performance\n{usd_short(p)}", ha="center", va="center",
+            color=TEXT, fontsize=BODY_FS, fontweight="bold")
+    ax.text(tot * 1.015, 0, f"{usd_short(tot)}\nper year", ha="left", va="center",
+            color=DARK_GREY, fontsize=BODY_FS, fontweight="bold")
+    ax.set_xlim(0, tot * 1.22); ax.set_ylim(-0.6, 0.6)
+    ax.axis("off")
+    plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+def chart_actual_vs_target():
+    """Three side-by-side actual-vs-target bars, one each for OEE, Availability and
+    Performance. OEE targets the benchmark; Availability and Performance target the
+    higher rate the benchmark implies."""
+    metrics = [("OEE", plant_oee, BENCHMARK_OEE),
+               ("Availability", plant_avail, AP_TARGET),
+               ("Performance", plant_perf, AP_TARGET)]
+    fig, axes = plt.subplots(1, 3, figsize=(CHART_W, 3.4), sharey=True)
+    for ax, (name, actual, target) in zip(axes, metrics):
+        ax.bar(0, actual * 100, width=0.6, color=DARK_BLUE)
+        ax.bar(1, target * 100, width=0.6, color=MED_GREY)
+        ax.text(0, actual * 100 + 1.5, f"{actual * 100:.1f}%", ha="center", va="bottom",
+                fontsize=BODY_FS, fontweight="bold", color=DARK_GREY)
+        ax.text(1, target * 100 + 1.5, f"{target * 100:.0f}%", ha="center", va="bottom",
+                fontsize=BODY_FS, fontweight="bold", color=DARK_GREY)
+        ax.set_title(name, fontsize=BODY_FS, fontweight="bold", color=DARK_GREY)
+        ax.set_xticks([0, 1]); ax.set_xticklabels(["Actual", "Target"], fontsize=BODY_FS)
+        ax.set_xlim(-0.7, 1.7); ax.set_ylim(0, 108)
+        chart_style(ax)
+    axes[0].set_ylabel("(%)")
+    axes[0].yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    plt.tight_layout()
+    return fig_to_b64(fig)
+
+
+print("Generating charts...")
+charts = {
+    "avt":         chart_actual_vs_target(),
+    "opp_bar":     chart_opportunity_bar(),
+    "ranking":     chart_machine_ranking(),
+    "trend":       chart_oee_trend(),
+    "planned_time": chart_planned_time(),
+    "pareto":      chart_failure_pareto(),
+    "timeofday":   chart_time_of_day(),
+    "pm_completion": chart_pm_completion(),
+    "perf_daily":  chart_perf_daily(),
+    "perf_age":    chart_perf_vs_age(),
+    "perf_within": chart_perf_within(),
+    "perf_loss":   chart_perf_loss(),
+    "setup":       chart_operator_setup(),
+    "cost":        chart_opportunity_by_machine(),
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HTML
+# ══════════════════════════════════════════════════════════════════════════════
+
+def img(key):
+    return (f'<img src="data:image/png;base64,{charts[key]}" '
+            f'style="width:100%;height:auto;display:block;">')
+
+
+worst, best = mach.iloc[0], mach.iloc[-1]
+_pl = cost.sort_values("perf_lost_hrs", ascending=False)
+_gap = lambda m: (AP_TARGET - cost.loc[m, "performance"]) * 100
+_t1, _t2 = _pl.index[:2]
+_aging_low_perf = list(cost[cost["is_aging_asset"]].sort_values("performance").index[:2])
+_aging_other = [m for m in cost.index[cost["is_aging_asset"]] if m not in _aging_low_perf][0]
+_rank_from_low = list(_pl.index[::-1]).index(_aging_other) + 1
+assert not cost.loc[[_t1, _t2], "is_aging_asset"].any()
+assert cost.loc[[_t1, _t2], "availability"].min() > cost.loc[_aging_low_perf, "availability"].max()
+assert round(_gap(_t1)) == round(_gap(_t2)) and _rank_from_low <= 4
+perf_loss_paragraph = (
+    f"As seen in the Pareto below, Performance losses are carried across the fleet. The two machines that lose the most "
+    f"hours, {_t1} and {_t2}, are not aging assets: both run about {_gap(_t1):.0f} points below target, close to the gap "
+    f"on the aging machines {_aging_low_perf[0]} and {_aging_low_perf[1]}, but they run more hours because their "
+    f"Availability is higher. {_aging_other}, an aging machine, is among the four machines that lose the fewest hours: while its "
+    f"gap is {_gap(_aging_other):.0f} points, it runs fewer hours due to low Availability. The {n_aging_assets} aging "
+    f"machines carry {aging_perf_share:.0%} of the total Performance loss by contribution margin.")
+lathe_oee, hmill_oee = by_type["CNC Lathe"][2], by_type["Horizontal Mill"][2]
+setup_flagged = os_[os_["setup_ratio_vs_cohort"] >= SETUP_OUTLIER_RATIO].sort_values("setup_ratio_vs_cohort", ascending=False)
+worst_pm = pm.sort_values("pct_ontime").iloc[0]
+top_two = cmms.groupby("failure_code")["downtime_hours"].sum().sort_values(ascending=False).head(2)
+top_two_pct = top_two.sum() / cmms["downtime_hours"].sum() * 100
+aging_ids = ", ".join(mach[mach["is_aging_asset"]]["machine_id"].head(2))
+aging_ids_all = ", ".join(mach[mach["is_aging_asset"]]["machine_id"])
+n_aging = int(mach["is_aging_asset"].sum())
+
+# Recommended actions, ranked by the annual impact each one carries. The mix
+# spans low- and high-capital moves: routine and coaching changes that cost
+# little, alongside the capital decisions on the oldest assets.
+ACTIONS = sorted([
+    (f"Reliability review, rebuild versus replace, for {aging_ids}",
+     "Oldest assets carry the most unplanned downtime (P1)",
+     reliability_impact, "High"),
+    ("Spindle rebuild and control retrofit on the oldest machines",
+     f"Performance falls about {abs(age_slope):.1f} points per year of machine age",
+     spindle_impact, "High"),
+    ("Tooling program: vendor consolidation and tool-life tracking",
+     f"Tooling and mechanical are level as the largest unplanned categories, {tooling_pct:.0f}% and {mechanical_pct:.0f}% of unplanned hours",
+     tooling_impact, "Low"),
+    (f"Setup standardisation coaching for {', '.join(setup_flagged['operator_id'])}",
+     f"Setups at {setup_ratio_mean:.1f}x the cohort median (P4)",
+     setup_impact, "None"),
+    ("Standardised shift-start warm-up and first-piece routine on both shifts",
+     f"Stoppages run {startup_lift:.1f}x higher in a shift's first {SHIFT_STARTUP_WINDOW_MIN} minutes (P2)",
+     shift_impact, "None"),
+    ("PM catch-up and compliance enforcement",
+     "Within-machine PM-overdue to alarm-rate linkage (P3)",
+     pm_impact, "Minimal"),
+], key=lambda row: row[2], reverse=True)
+
+actions_rows = "".join(
+    f'<tr><td>{action}</td><td>{finding}</td>'
+    f'<td style="text-align:right;font-weight:700;">{usd_short(value)}</td><td>{capital}</td></tr>'
+    for action, finding, value, capital in ACTIONS)
+no_capital_actions = ", ".join(a for a, _, _, c in ACTIONS if c in ("None", "Minimal"))
+capital_share = sum(v for _, _, v, c in ACTIONS if c == "High") / sum(v for _, _, v, _ in ACTIONS)
+# The wording of Sections 1 and 3 rests on these; the run stops if the record stops supporting it.
+assert plant_perf < plant_avail
+assert abs(_code_hours.iloc[0] - _code_hours.iloc[1]) / _code_hours.iloc[0] < 0.05
+assert round(top_two.iloc[0], -2) == round(top_two.iloc[1], -2)
+assert sum(1 for _, _, _, c in ACTIONS if c == "High") == 2
+
+html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Analytics Diagnostic Report: OEE &amp; Machine Health</title>
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background:#fff; color:{TEXT}; font-size:16px; line-height:1.7; }}
+  .page-header {{ background:{DARK_GREY}; color:#fff; padding:14px 40px; display:flex;
+    justify-content:space-between; align-items:center; gap:24px; }}
+  .page-header .byline {{ font-size:12px; color:#fff; white-space:nowrap; }}
+  .chart-caption {{ font-size:12px; color:#8093A4; margin-top:8px; text-align:center; font-style:italic; }}
+  .page-header h1 {{ font-size:21px; font-weight:700; letter-spacing:-0.3px; }}
+  .layout {{ display:flex; max-width:1200px; margin:0 auto; padding:0 40px; }}
+  .toc {{ width:240px; flex-shrink:0; padding:40px 20px 40px 0; position:sticky;
+    top:0; height:100vh; overflow-y:auto; border-right:1px solid #D5DCE1; }}
+  .toc-title {{ font-size:10px; letter-spacing:2px; text-transform:uppercase; color:#8093A4;
+    margin-bottom:14px; font-weight:600; }}
+  .toc a {{ display:block; font-size:13px; color:#8093A4; text-decoration:none;
+    padding:5px 0 5px 10px; border-left:2px solid transparent; }}
+  .toc a:hover {{ color:{DARK_GREY}; border-left-color:{DARK_GREY}; }}
+  .content {{ flex:1; padding:40px 0 80px 52px; max-width:860px; }}
+  .section-title-block {{ margin:46px 0 22px; padding-bottom:12px; border-bottom:2px solid {DARK_GREY}; }}
+  .content > .section-title-block:first-child {{ margin-top:8px; }}
+  /* Section titles read black; the chart and table titles under them read
+     dark grey. */
+  .section-label {{ font-size:10px; letter-spacing:2px; text-transform:uppercase;
+    color:{TEXT}; font-weight:600; margin-bottom:4px; }}
+  .section-title {{ font-size:22px; font-weight:700; color:{TEXT}; }}
+  p {{ margin-bottom:16px; color:#000000; }}
+  .chart-wrap {{ margin:20px 0; border:1px solid #D5DCE1; border-radius:4px; padding:12px; }}
+  .chart-title {{ font-size:16px; font-weight:700; text-align:center; margin-bottom:8px; color:{DARK_GREY}; }}
+  .kpi-row {{ display:flex; gap:16px; margin:22px 0; flex-wrap:wrap; }}
+  .kpi {{ flex:1; min-width:140px; background:#F3F5F7; border:1px solid #D5DCE1;
+    border-radius:6px; padding:16px 18px; }}
+  .kpi .v {{ font-size:25px; font-weight:700; color:{DARK_GREY}; }}
+  .kpi .l {{ font-size:12px; color:#8093A4; text-transform:uppercase; letter-spacing:.5px; margin-top:2px; }}
+  .kpi.warn .v {{ color:{ACCENT_RED}; }}
+  table {{ width:100%; border-collapse:collapse; margin:16px 0; font-size:14px; }}
+  th {{ background:#F3F5F7; padding:10px 12px; text-align:left; font-size:12px;
+    font-weight:600; text-transform:uppercase; letter-spacing:.5px; color:#8093A4; border-bottom:2px solid #D5DCE1; }}
+  td {{ padding:9px 12px; border-bottom:1px solid #D5DCE1; color:#000000; }}
+  tr:hover td {{ background:#F3F5F7; }}
+  .flag {{ color:{ACCENT_RED}; font-weight:700; }}
+  @page {{ margin:12mm; }}
+  @media print {{
+    .toc {{ display:none; }}
+    .layout {{ max-width:none; margin:0; padding:0; }}
+    .content {{ max-width:none; padding:20px 28px; }}
+    .page-header {{ padding:12px 28px; }}
+    .chart-wrap, table, .kpi-row, .kpi {{ break-inside:avoid; }}
+    .section-title-block {{ break-after:avoid; }}
+    tr, img {{ break-inside:avoid; }}
+  }}
+</style>
+</head>
+<body>
+<div class="page-header">
+  <h1>Analytics Diagnostic Report: OEE &amp; Machine Health</h1>
+  <div class="byline">Created by Brian Davis, 2026</div>
+</div>
+<div class="layout">
+  <nav class="toc">
+    <div class="toc-title">Contents</div>
+    <a href="#summary">1 &middot; Executive Summary</a>
+    <a href="#machines">2 &middot; Machine-level OEE Breakdown</a>
+    <a href="#availability">3 &middot; Deep Dive: Availability</a>
+    <a href="#performance">4 &middot; Deep Dive: Performance</a>
+    <a href="#cost">5 &middot; Margin Uplift Opportunity Detail</a>
+    <a href="#actions">6 &middot; Recommended Actions</a>
+  </nav>
+  <main class="content">
+
+    <div class="section-title-block" id="summary">
+      <div class="section-label">Section 1</div>
+      <h2 class="section-title">Executive Summary</h2>
+    </div>
+    <p>Over the period from January 2023 to March 2026, plant Overall Equipment Effectiveness (OEE)
+    averaged <strong>{plant_oee:.1%}</strong>, against a target of {BENCHMARK_OEE:.0%}. <strong>Performance</strong> ({plant_perf:.1%}), actual machine output rate relative to its ideal rate
+    while running, is the larger part of the shortfall; <strong>Availability</strong>
+    ({plant_avail:.1%}), total machine running time relative to planned production time, is the
+    smaller. Note that Quality is excluded from this report. We assumed a rate of {quality:.0%} for
+    purposes of calculating OEE.</p>
+    <div class="chart-wrap"><div class="chart-title">Plant OEE, Availability, and Performance, Actual vs. Target</div>{img('avt')}</div>
+    <p>The single largest driver of the gap between today's {plant_oee:.1%} OEE and the
+    {BENCHMARK_OEE:.0%} target is the underperformance of the shop's oldest machines. The
+    {n_aging_assets} aging machines (over nine years old), <span class="flag">{aging_ids_all}</span>,
+    run at {aging_oee:.0%} OEE against {newer_oee:.0%} for the rest of the fleet, about {oee_gap_r}
+    points lower. Their Availability is roughly {avail_gap_r} points below the newer machines
+    ({aging_avail:.0%} versus {newer_avail:.0%}), because they stop and alarm more often, and their
+    Performance is about {perf_gap_r} points lower ({aging_perf:.0%} versus {newer_perf:.0%}),
+    because their cycle time is slowed by worn spindles, dated controls and more conservative feeds and
+    speeds. Although they are only
+    {n_aging_assets} of {n_fleet} machines, they carry about {aging_opp_share:.0%} of the total
+    margin opportunity shown below.</p>
+    <div class="chart-wrap"><div class="chart-title">Annual Contribution Margin Opportunity at {BENCHMARK_OEE:.0%} Target OEE</div>{img('opp_bar')}</div>
+    <p>Reaching the {BENCHMARK_OEE:.0%} target OEE (implying Availability and Performance of
+    {AP_TARGET:.0%}) is worth an estimated <strong>{usd_short(opportunity_annual)} per year</strong>
+    in additional contribution margin ({usd_short(avail_opp_annual)} from Availability and
+    {usd_short(perf_opp_annual)} from Performance). Closing that gap between actual and target
+    requires execution across a handful of levers, as detailed in Section 6. The two that carry most
+    of the value are capital decisions on the oldest machines: a spindle rebuild and control
+    retrofit, and a reliability review of whether to rebuild or replace them.</p>
+
+    <div class="section-title-block" id="machines">
+      <div class="section-label">Section 2</div>
+      <h2 class="section-title">Machine-level OEE Breakdown</h2>
+    </div>
+    <p>Across all machines, OEE ranges from {worst['oee']:.0%} to {best['oee']:.0%}. CNC lathes
+    consistently have higher OEE than the vertical and horizontal mills. This pattern is due to the
+    mills being older machines that are most frequently in need of routine
+    maintenance, and that also take the most complex work, and so lose more time to stoppages and
+    generally run slower. The lathes are newer and run simpler jobs. As mentioned, the three aging
+    machines (>9 years old), <span class="flag">{aging_ids_all}</span>,
+    have the lowest OEE among the fleet.</p>
+    <div class="chart-wrap"><div class="chart-title">OEE by Machine</div>{img('ranking')}</div>
+    <p>The OEE by machine type holds steady across the period, with no noticeable increases or
+    decreases over time.</p>
+    <div class="chart-wrap"><div class="chart-title">OEE Trend by Machine Type</div>{img('trend')}</div>
+    <p>The chart below shows each machine type's planned production time split into three parts:
+    time spent productive (running at target speed), time lost to downtime (an Availability loss),
+    and time lost to slow cycle times (a Performance loss). The productive share of time for each
+    machine type holds fairly steady from month to month.</p>
+    <div class="chart-wrap"><div class="chart-title">Productive vs. Lost Time by Machine Type (Monthly)</div>{img('planned_time')}</div>
+
+    <div class="section-title-block" id="availability">
+      <div class="section-label">Section 3</div>
+      <h2 class="section-title">Deep Dive: Availability</h2>
+    </div>
+    <p>The Pareto below shows the shop's unplanned downtime by failure mode over the full period
+    ({PERIOD_LABEL}). {top_two.index[0].capitalize()} and {top_two.index[1].lower()} issues each
+    caused about {round(top_two.iloc[0], -2):,.0f} hours of unplanned downtime, and together make up
+    {top_two_pct:.0f}% of unplanned repair hours.</p>
+    <div class="chart-wrap"><div class="chart-title">Unplanned Downtime by Failure Code</div>{img('pareto')}</div>
+    <p>Downtime is not spread evenly through the day. Across the full observation window
+    ({PERIOD_LABEL}), unplanned stoppages concentrate at the beginning of shifts before steadying
+    across the middle and end of the shifts. As seen in the chart below, during the first
+    {SHIFT_STARTUP_WINDOW_MIN} minutes of each shift, unplanned stoppages run about
+    {startup_lift:.1f}x the mid-shift rate: {startup_lift_a:.1f}x on Shift A and
+    {startup_lift_b:.1f}x on Shift B. A standardised shift-start routine, including a documented
+    warm-up sequence and first-piece check written into the opening of every shift, addresses this
+    window; as detailed in Section 6, it represents a potential contribution margin uplift of about
+    {usd_short(shift_impact)} per year.</p>
+    <div class="chart-wrap"><div class="chart-title">Unplanned Stoppages by Time Into Shift</div>{img('timeofday')}</div>
+    <p>Analyzing setup time by operator, we find that most machinists cluster near the cohort median
+    of {os_['cohort_median_setup_hours'].iloc[0] * 60:.0f} minutes per job, with just a modest spread
+    across most of the operators. Three of them,
+    <span class="flag">{', '.join(setup_flagged['operator_id'])}</span>, sit consistently above the
+    rest at about {setup_flagged['setup_ratio_vs_cohort'].mean():.1f}x the median, roughly
+    {(setup_flagged['median_setup_hours'].mean() - os_['cohort_median_setup_hours'].iloc[0]) * 60:.0f}
+    minutes longer on every job they run. There is a potential opportunity for targeted coaching and
+    setup-standardisation to recover Availability at no capital cost.</p>
+    <div class="chart-wrap"><div class="chart-title">Median Setup Hours by Operator</div>{img('setup')}</div>
+    <p>Shop-wide on-time calendar PM completion is {pm['pct_ontime'].mean():.0f}% and uneven, with
+    <span class="flag">{worst_pm['machine_id']}</span> at only {worst_pm['pct_ontime']:.0f}%. The
+    repair-interval services were completed before the failure on {svc_before_fleet:.0f}% of
+    occasions: {n_late_failures} unplanned failures over the period came after the machine's
+    repair-interval had been reached and before a service was carried out. The failures that came
+    after the interval was reached took about {late_failure_excess_hours:,.0f} hours a year of
+    unplanned repair more than repair-interval services would have taken at each machine's average.
+    And while a machine was overdue on calendar PM, it spent about
+    {overdue_alarm_excess_hours:,.0f} hours a year in an alarm state above what it spends when its
+    calendar PM is current.</p>
+    <div class="chart-wrap"><div class="chart-title">On-Time Maintenance by Machine: Calendar PM and Interval Service</div>{img('pm_completion')}
+    <div class="chart-caption">Average downtime per event: calendar PM {avg_event_hours['CMMS_CALENDAR_PM']:.1f} hours, interval service
+    {avg_event_hours['CMMS_INTERVAL_SERVICE']:.1f} hours, unplanned repair {avg_event_hours['CMMS_REPAIR']:.1f} hours.</div></div>
+
+    <div class="section-title-block" id="performance">
+      <div class="section-label">Section 4</div>
+      <h2 class="section-title">Deep Dive: Performance</h2>
+    </div>
+    <p>Performance across the shop averaged {plant_perf:.1%} against the {AP_TARGET:.0%} target.
+    Unlike Availability, where the losses trace to events (breakdowns, alarms, shift starts and
+    setups), the Performance loss is a steady level that each machine holds from day to day. As
+    seen in the chart below, every machine's daily Performance sits in a narrow band around
+    its own median: the typical machine moves {day_move_pts:.0f} points from one day to the next,
+    while the gap between the best and worst machine is {fleet_gap_pts:.0f} points.</p>
+    <div class="chart-wrap"><div class="chart-title">Daily Performance by Machine, Ordered by Age</div>{img('perf_daily')}</div>
+    <p>    Performance is closely tied to machine age. Older machines hold a slower cycle through worn
+    spindles, dated controls, and more conservative feeds and speeds. As seen in the chart below, the
+    relationship is strong: across the shop, Performance falls about {abs(age_slope):.1f} percentage
+    points for every year of machine age (r = {age_r:.2f}), and machine type accounts for part of
+    what age does not: at the same age, the lathes run about {lathe_same_age_pts:.0f} points above
+    the mills.</p>
+    <div class="chart-wrap"><div class="chart-title">Performance vs. Machine Age</div>{img('perf_age')}
+      <div class="chart-caption">One point per machine. Fitted line: {age_slope:.1f} Performance points per year of age, r = {age_r:.2f}, R&sup2; = {age_r**2:.2f}.</div></div>
+    <p>If Performance were impacted by how the machines are run, it would vary with who is running
+    them and when. As seen in the two panels below, it does not. For each machine, Shift A and
+    Shift B run within {shift_max_diff:.1f} points of each other, and the spread across the operators
+    who run the same machine is about {operator_spread_pts:.0f} point (at most
+    {operator_spread_max:.1f}), inside the day-to-day noise of the machine itself. The same machine
+    runs at the same rate whoever is at the controls. This is the opposite of what Section 3 found
+    for Availability, where the shift-start window, PM status and setup discipline each move the
+    figure, and it rules out training and coaching as Performance levers.</p>
+    <div class="chart-wrap"><div class="chart-title">Performance Within Machine, by Shift and by Operator</div>{img('perf_within')}
+      <div class="chart-caption">Machines ordered by age. Operators with {MIN_OPERATOR_INTERVALS} or more running intervals on the machine, joined through the HR master.</div></div>
+    <p>{perf_loss_paragraph}</p>
+    <div class="chart-wrap"><div class="chart-title">Annual Performance Loss by Machine: Hours and Contribution Margin</div>{img('perf_loss')}
+      <div class="chart-caption">Bars: running hours lost against the {AP_TARGET:.0%} Performance target. Labels: hours, and the Performance margin Section 5 attributes to the machine, which totals {usd_short(perf_opp_annual)}.</div></div>
+
+    <div class="section-title-block" id="cost">
+      <div class="section-label">Section 5</div>
+      <h2 class="section-title">Margin Uplift Opportunity Detail</h2>
+    </div>
+    <p>The OEE misses detailed above translate directly into lost contribution margin, the
+    incremental profit on each productive machine hour (revenue net of variable cost). Valued at each
+    machine type's contribution margin ({rate_str}), reaching the {BENCHMARK_OEE:.0%} target is worth
+    an estimated <strong>${opportunity_annual / 1e6:.1f} million per year</strong>. This opportunity
+    is split between Availability (<strong>{usd_short(avail_opp_annual)} per year</strong>), meaning
+    less machine downtime and faster changeovers, and Performance
+    (<strong>{usd_short(perf_opp_annual)} per year</strong>), meaning running machines nearer ideal
+    speed.</p>
+    <p>Within Availability, unplanned reactive repairs run about
+    <strong>{usd_short(reactive_repair_annual)} per year</strong> ({unplanned_hours_annual:,.0f}
+    hours), a small part of the total, since the interval services pre-empt most failures. The
+    balance is idle, setup and changeover time, where the operator setup-time gap is one opportunity.
+    Within Performance, the loss is a steady level on each machine, highest on the oldest machines as
+    detailed above.</p>
+    <div class="chart-wrap"><div class="chart-title">Annual Contribution Margin Uplift Opportunity at 85% OEE, by Machine</div>{img('cost')}</div>
+
+    <div class="section-title-block" id="actions">
+      <div class="section-label">Section 6</div>
+      <h2 class="section-title">Recommended Actions</h2>
+    </div>
+    <p>The findings resolve into six actions, ranked below by the annual impact each one carries.
+    The list spans both low- and high-capital moves, from routine and coaching changes that cost
+    little to the capital decisions on the oldest assets. Two capital actions on the oldest machines
+    carry {capital_share:.0%} of the total; the other four are low-cost and small. The estimates are drawn from the same data
+    and contribution-margin assumptions used throughout this report.</p>
+    <table>
+      <thead><tr><th>Action</th><th>Supporting Finding</th>
+        <th style="text-align:right;">Est. Annual Impact</th><th>Capital Required</th></tr></thead>
+      <tbody>{actions_rows}</tbody>
+    </table>
+
+  </main>
+</div>
+</body>
+</html>"""
+
+OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+OUTPUT.write_text(html, encoding="utf-8")
+print(f"Diagnostic report written to {OUTPUT}")
+print(f"  Plant OEE {plant_oee:.1%} | opportunity ${opportunity_annual:,.0f}/yr "
+      f"(availability ${avail_opp_annual:,.0f} + performance ${perf_opp_annual:,.0f})")

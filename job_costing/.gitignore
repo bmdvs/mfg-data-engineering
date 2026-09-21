@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Environment
+.env
+.venv/
+
+# Source extracts and exported marts: rebuilt by the scripts (committed samples show the shape)
+data_source/raw/
+analytics/data/
+
+# Working tables and notes from data preparation
+data_source/truth/
+data_source/generate/truth/
+data_source/generate/DEVIATIONS.md
+
+# dbt (profiles.yml is committed: it holds only a relative DuckDB path)
+data_pipeline/.user.yml
+data_pipeline/target/
+data_pipeline/dbt_packages/
+data_pipeline/logs/
+
+# DuckDB
+*.duckdb
+*.duckdb.wal

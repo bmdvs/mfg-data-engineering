@@ -1,0 +1,56 @@
+version: 2
+
+models:
+
+  - name: int_quality__orders_with_inspections
+    columns:
+      - name: work_order_id
+        tests: [not_null, unique]
+      - name: operator_id
+        tests: [not_null]
+      - name: job_start
+        tests: [not_null]
+      - name: has_first_piece_inspection
+        tests: [not_null]
+      - name: quantity_inspected
+        tests: [not_null]
+
+  - name: int_quality__orders_enriched
+    columns:
+      - name: work_order_id
+        tests: [not_null, unique]
+      - name: machine_type
+        tests: [not_null]
+      - name: hire_date
+        tests: [not_null]
+      - name: run_position
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3]
+                quote: false
+      - name: jobs_on_machine_type_before
+        tests: [not_null]
+      - name: hours_into_operator_day
+        tests: [not_null]
+      - name: is_after_gauge_change
+        tests: [not_null]
+      - name: is_coverage
+        tests: [not_null]
+      - name: nominal_thickness_in
+        tests: [not_null]
+    tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "hours_into_operator_day >= 0 and hours_into_operator_day < 16"
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "lot_age_days is null or lot_age_days >= 0"
+
+  - name: int_quality__scrap_costs
+    columns:
+      - name: scrap_id
+        tests: [not_null, unique]
+      - name: total_scrap_cost
+        tests: [not_null]

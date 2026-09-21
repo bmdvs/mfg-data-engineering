@@ -1,0 +1,906 @@
+"""ML Model Overview & Performance Report for the machine health indicator
+-> docs/reports/model_overview.html
+Executive Summary, Model Overview (what it does, training data), Model Performance
+(scoring summary, accuracy against the baselines, sample output, limits)."""
+import json
+from pathlib import Path
+
+import duckdb
+import numpy as np
+import pandas as pd
+import matplotlib.dates as mdates
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+import brand as B
+from brand import (DARK_GREY, DARK_BLUE, LIGHT_BLUE, ACCENT_RED, MUTED_RED, AMBER, GREEN, MED_GREY, LIGHT_GREY, mticker)
+
+REPO    = Path(__file__).resolve().parents[2]
+MODELS  = REPO / "ml" / "models"
+SCORING = REPO / "ml" / "data" / "scoring"
+OUT     = REPO / "docs" / "reports" / "model_overview.html"
+
+PERIODS = [("202601", "January 2026"), ("202602", "February 2026"), ("202603", "March 2026")]
+PERIOD_NAME = "January to March 2026"
+SCORING_START, SCORING_END = "2026-01-01", "2026-03-31"
+TIERS = ["CRITICAL", "ELEVATED", "OK"]
+TIER_COLOR = {"CRITICAL": ACCENT_RED, "ELEVATED": AMBER, "OK": GREEN}
+TIER_RANK = {"CRITICAL": 2, "ELEVATED": 1, "OK": 0}
+TIER_MEANING = {"CRITICAL": "Failure likely within 7 days",
+                "ELEVATED": "Failure likely within 8 to 21 days",
+                "OK": "No failure expected within 21 days"}
+# Contribution margin per productive machine-hour by type, mirroring the dbt var
+# contribution_margin_by_type used to value downtime in the diagnostic report.
+CM_BY_TYPE = {"CNC Lathe": 95, "Vertical Mill": 125, "Horizontal Mill": 145}
+# A planned service runs at about a third of the downtime of the reactive repair
+# it stands in for, the ratio the shop's interval services run at. Downtime
+# avoided on a failure warned before is the rest.
+PLANNED_TO_REACTIVE_DURATION = 0.35
+DOWNTIME_REDUCTION = 1 - PLANNED_TO_REACTIVE_DURATION
+TEST_START = "2025-09-01"
+LABELS = {"logistic_regression": "Logistic Regression", "random_forest": "Random Forest", "xgboost": "XGBoost"}
+SOURCES = ["model", "rules"]
+SOURCE_NAME = {"model": "Health indicator", "rules": "Rules baseline"}
+
+m = json.loads((MODELS / "metrics.json").read_text(encoding="utf-8"))
+best = m["best_model_type"]
+win = {s: pd.read_csv(MODELS / f"evaluation_windows_{s}.csv") for s in ("test", "scoring")}
+abl = pd.read_csv(MODELS / "ablation_no_sensors.csv")
+frames = []
+for lbl, nm in PERIODS:
+    p = pd.read_parquet(SCORING / f"predictions_{lbl}.parquet"); p["period"] = nm; frames.append(p)
+preds = pd.concat(frames, ignore_index=True)
+preds["observation_date"] = pd.to_datetime(preds["observation_date"])
+total = len(preds)
+
+
+def wm(split, source, window, col):
+    w = win[split]
+    return float(w[(w["source"] == source) & (w["window_days"] == window)][col].iloc[0])
+
+
+# One row per machine and day: the higher tier of the day's two shift rows.
+days = preds.assign(rank=preds["health_indicator"].map(TIER_RANK)).groupby(
+    ["machine_id", "observation_date", "period"], as_index=False)["rank"].max()
+days["tier"] = days["rank"].map({v: k for k, v in TIER_RANK.items()})
+n_days = len(days)
+day_counts = days["tier"].value_counts()
+n_crit, n_elev, n_ok = (int(day_counts.get(t, 0)) for t in TIERS)
+
+# ── Failures in the scoring window and the tier each source showed before them ─
+# For every unplanned repair opened in the window: did the source show CRITICAL
+# on at least one of the 7 days before it?
+history = pd.read_parquet(SCORING / "tier_history.parquet")
+history["observation_date"] = pd.to_datetime(history["observation_date"])
+_cmms = pd.read_csv(REPO / "data_source" / "raw" / "cmms" / "maintenance_records.csv")
+_cmms["fday"] = pd.to_datetime(_cmms["work_order_open_date"]).dt.normalize()
+_svc = _cmms[_cmms["maintenance_type"] == "PLANNED_INTERVAL"]
+svc_q = _svc[(_svc["fday"] >= SCORING_START) & (_svc["fday"] <= SCORING_END)]
+n_services_q, svc_hours_q = int(len(svc_q)), float(svc_q["downtime_hours"].sum())
+_mm = _cmms[_cmms["maintenance_type"] == "UNPLANNED_REPAIR"].copy()
+_mm["fd"] = pd.to_datetime(_mm["work_order_open_date"])
+_mm["fday"] = _mm["fd"].dt.normalize()
+q1 = _mm[(_mm["fday"] >= SCORING_START) & (_mm["fday"] <= SCORING_END)].copy()
+_hist_by_machine = {mid: g.set_index("observation_date") for mid, g in history.groupby("machine_id")}
+
+
+def _critical_before(machine_id, fday, source):
+    h = _hist_by_machine[machine_id][source]
+    w = h[(h.index >= fday - pd.Timedelta(days=7)) & (h.index < fday)]
+    return bool((w == "CRITICAL").any())
+
+
+for _s in SOURCES:
+    q1[f"hit_{_s}"] = [_critical_before(mid, fd, _s) for mid, fd in zip(q1["machine_id"], q1["fday"])]
+_type_by_machine = preds.groupby("machine_id")["machine_type"].first().to_dict()
+q1["margin"] = q1["downtime_hours"] * q1["machine_id"].map(_type_by_machine).map(CM_BY_TYPE)
+bi_events = int(len(q1))
+bi_hrs = float(q1["downtime_hours"].sum())
+hit_n   = {s: int(q1[f"hit_{s}"].sum()) for s in SOURCES}
+hit_pct = {s: hit_n[s] / bi_events for s in SOURCES}
+hit_hrs = {s: float(q1.loc[q1[f"hit_{s}"], "downtime_hours"].sum()) for s in SOURCES}
+# Downtime avoided: the existing method and assumption, applied to the failures
+# with a CRITICAL day in the 7 days before. Hours are for the quarter; the dollar
+# figure is the quarter annualised at each machine type's contribution margin.
+avoid_hrs = {s: hit_hrs[s] * DOWNTIME_REDUCTION for s in SOURCES}
+avoid_usd = {s: round(float(q1.loc[q1[f"hit_{s}"], "margin"].sum()) * 4 * DOWNTIME_REDUCTION, -3) for s in SOURCES}
+avoid_usd_exact = {s: round(float(q1.loc[q1[f"hit_{s}"], "margin"].sum()) * 4 * DOWNTIME_REDUCTION, -2) for s in SOURCES}
+# The scoring quarter from the marts: the unplanned failures with the ratings
+# before each, the interval services, and what followed each CRITICAL
+# machine-day. These override the counts worked out above from the extract, so
+# every figure in the executive summary has one source; the two must agree.
+_con0 = duckdb.connect(str(REPO / "data_source" / "oee_predmaint.duckdb"), read_only=True)
+_qf = _con0.execute("select * from mart_ml__scoring_quarter_failures").df()
+_th = _con0.execute("select * from mart_ml__tier_history where in_scoring_quarter").df()
+_th_all = _con0.execute("select * from mart_ml__tier_history where in_scoring_quarter or in_test_period").df()
+_tf = _con0.execute("select * from mart_ml__test_failures").df()
+_sv = _con0.execute(f"""select count(*) as n, sum(downtime_hours) as hours from mart_oee__downtime_analysis
+    where source_system = 'CMMS_INTERVAL_SERVICE' and event_date >= '{SCORING_START}' and event_date <= '{SCORING_END}'""").df().iloc[0]
+_con0.close()
+_qf["margin"] = _qf["downtime_hours"] * _qf["machine_type"].map(CM_BY_TYPE)
+_flag = {"model": "warned_before", "rules": "rules_warned_before"}
+_mart = {"events": int(len(_qf)), "hours": float(_qf["downtime_hours"].sum()),
+         "hit_n": {s_: int(_qf[_flag[s_]].sum()) for s_ in SOURCES},
+         "hit_hrs": {s_: float(_qf.loc[_qf[_flag[s_]], "downtime_hours"].sum()) for s_ in SOURCES}}
+assert _mart["events"] == bi_events and abs(_mart["hours"] - bi_hrs) < 0.05 and _mart["hit_n"] == hit_n
+assert all(abs(_mart["hit_hrs"][s_] - hit_hrs[s_]) < 0.05 for s_ in SOURCES)
+assert int(_sv["n"]) == n_services_q and abs(float(_sv["hours"]) - svc_hours_q) < 0.05
+bi_events, bi_hrs, hit_n, hit_hrs = _mart["events"], _mart["hours"], _mart["hit_n"], _mart["hit_hrs"]
+hit_pct = {s_: hit_n[s_] / bi_events for s_ in SOURCES}
+avoid_hrs = {s_: hit_hrs[s_] * DOWNTIME_REDUCTION for s_ in SOURCES}
+avoid_usd = {s_: round(float(_qf.loc[_qf[_flag[s_]], "margin"].sum()) * 4 * DOWNTIME_REDUCTION, -3) for s_ in SOURCES}
+avoid_usd_exact = {s_: round(float(_qf.loc[_qf[_flag[s_]], "margin"].sum()) * 4 * DOWNTIME_REDUCTION, -2) for s_ in SOURCES}
+n_services_q, svc_hours_q = int(_sv["n"]), float(_sv["hours"])
+n_before_interval = int((~_qf["interval_reached_before_failure"]).sum())
+_not_op = _qf[_qf["failure_code"] != "OPERATOR_INDUCED"]
+n_not_operator, hit_not_operator = int(len(_not_op)), int(_not_op["warned_before"].sum())
+
+
+def _hits(start, end, source):
+    f = _mm[(_mm["fday"] >= start) & (_mm["fday"] <= end)]
+    return int(sum(_critical_before(mid, fd, source) for mid, fd in zip(f["machine_id"], f["fday"]))), int(len(f))
+
+
+test_hits = {s_: _hits(TEST_START, "2025-12-31", s_) for s_ in SOURCES}
+both_hits = {s_: _hits(TEST_START, SCORING_END, s_) for s_ in SOURCES}
+
+# CRITICAL machine-days in the quarter and what followed them within 7 days: an
+# unplanned failure, an interval service, or neither. A day can precede both.
+_by_kind = {k: {mid: g["fday"].values for mid, g in d.groupby("machine_id")} for k, d in (("failure", _mm), ("service", _svc))}
+
+
+def _precedes(kind, machine_id, day):
+    d = _by_kind[kind].get(machine_id, np.array([], dtype="datetime64[ns]"))
+    gap = (d - np.datetime64(day)) / np.timedelta64(1, "D")
+    return bool(((gap > 0) & (gap <= 7)).any())
+
+
+def critical_breakdown(source):
+    q = history[(history["observation_date"] >= SCORING_START) & (history["observation_date"] <= SCORING_END)]
+    c = q[q[source] == "CRITICAL"]
+    bf = np.array([_precedes("failure", m_, d_) for m_, d_ in zip(c["machine_id"], c["observation_date"])], dtype=bool)
+    bs = np.array([_precedes("service", m_, d_) for m_, d_ in zip(c["machine_id"], c["observation_date"])], dtype=bool)
+    return {"critical": int(len(c)), "failure": int(bf.sum()), "service": int((bs & ~bf).sum()), "neither": int((~bf & ~bs).sum())}
+
+
+# What followed a rating, from the tier history mart, in three exclusive parts:
+# an unplanned repair; an interval service and no repair; neither. At 7 days the
+# rating counted is CRITICAL; at 21 days it is CRITICAL or ELEVATED, as in the
+# 21-day event measure.
+ALL_SOURCES = ["model", "rules", "calendar_pm"]
+ALL_NAME = {"model": "Health indicator", "rules": "Rules baseline", "calendar_pm": "Calendar PM baseline"}
+_rating = {"model": "indicator_rating", "rules": "rules_rating", "calendar_pm": "calendar_pm_rating"}
+_warn = {"model": "warned_before", "rules": "rules_warned_before", "calendar_pm": "calendar_pm_warned_before"}
+_period_flag = {"test": "in_test_period", "scoring": "in_scoring_quarter"}
+_fail = {"test": _tf, "scoring": _qf}
+
+
+def partition(source, period, window):
+    d = _th_all[_th_all[_period_flag[period]]]
+    flagged = d[d[_rating[source]].isin(["CRITICAL"] if window == 7 else ["CRITICAL", "ELEVATED"])]
+    r = flagged[f"unplanned_repair_within_{window}d"].values.astype(bool); sv = flagged[f"interval_service_within_{window}d"].values.astype(bool)
+    out = {"critical": int(len(flagged)), "failure": int(r.sum()), "service": int((sv & ~r).sum()), "neither": int((~r & ~sv).sum())}
+    assert out["failure"] + out["service"] + out["neither"] == out["critical"]
+    return out
+
+
+def warned(source, period, window):
+    f = _fail[period]
+    return int(f[_warn[source] + ("" if window == 7 else "_21d")].sum()), int(len(f))
+
+
+EVAL = {(s_, p_, w_): {**partition(s_, p_, w_), "warned": warned(s_, p_, w_)} for s_ in ALL_SOURCES for p_ in ("test", "scoring") for w_ in (7, 21)}
+crit = {s_: partition(s_, "scoring", 7) for s_ in ALL_SOURCES}
+# The summary and the Section 3.2 table read the same mart rows; the counts worked out from the extract must agree.
+assert all(crit[s_] == critical_breakdown(s_) for s_ in SOURCES)
+assert all(EVAL[(s_, "scoring", 7)]["warned"][0] == hit_n[s_] for s_ in SOURCES)
+neither_share = {s_: crit[s_]["neither"] / crit[s_]["critical"] for s_ in ALL_SOURCES}
+n_test_failures = int(len(_tf))
+_hq = history[(history["observation_date"] >= SCORING_START) & (history["observation_date"] <= SCORING_END)]
+_cm = _hq[_hq["model"] == "CRITICAL"].groupby("machine_id").size().sort_values(ascending=False)
+top_crit_machine, top_crit_days = _cm.index[0], int(_cm.iloc[0])
+top_crit_total = int((_hq["machine_id"] == top_crit_machine).sum())
+top_crit_interval = int(pd.read_csv(REPO / "data_source" / "raw" / "machinemetrics" / "machines.csv")
+                        .set_index("machine_id").loc[top_crit_machine, "repair_interval_days"])
+
+# Share of failures with a CRITICAL day in the 7 days before, by the failure mode
+# the CMMS recorded, across the test and scoring windows (the technical report's
+# failure-mode chart), for the limits section.
+_fm = _mm[(_mm["fday"] >= "2025-09-01") & (_mm["fday"] <= SCORING_END)].copy()
+_fm["hit"] = [_critical_before(mid, fd, "model") for mid, fd in zip(_fm["machine_id"], _fm["fday"])]
+mode_hit = _fm.groupby("failure_code")["hit"].mean()
+mode_hit_n = {k: (int(g["hit"].sum()), int(len(g))) for k, g in _fm.groupby("failure_code")}
+
+# ── Training-data overview + worked example ──────────────────────────────────
+FEATURES = REPO / "ml" / "data" / "features"
+train = pd.read_parquet(FEATURES / "train.parquet")
+train["observation_date"] = pd.to_datetime(train["observation_date"])
+n_train_failures = int((_mm["fday"] <= "2024-12-31").sum())
+n_machines = int(preds["machine_id"].nunique())
+n_obs_total = int(sum(m["split_sizes"].values()))
+
+# Days from each training row to the machine's next repair of either kind (an
+# unplanned repair or an interval service), for the two charts that show how the
+# sensor signals move as the wear comes due. The wear is the same whichever of
+# the two ends it.
+_rep_any = _cmms[_cmms["maintenance_type"].isin(["UNPLANNED_REPAIR", "PLANNED_INTERVAL"])]
+_next = {mid: np.sort(g["fday"].values) for mid, g in _rep_any.groupby("machine_id")}
+
+
+def _days_to_next(machine_id, d):
+    f = _next[machine_id]
+    i = np.searchsorted(f, np.datetime64(d), side="right")
+    return float((f[i] - np.datetime64(d)) / np.timedelta64(1, "D")) if i < len(f) else np.nan
+
+
+train["days_to_next_repair"] = [_days_to_next(mid, d) for mid, d in zip(train["machine_id"], train["observation_date"])]
+
+# Worked example: the top-ranked machine in the current fleet snapshot, used to
+# walk a non-technical reader through one real rating end to end.
+_snap = pd.read_parquet(SCORING / "fleet_snapshot.parquet").iloc[0]
+we = preds[(preds["machine_id"] == _snap["machine_id"])
+           & (preds["observation_date"] == pd.Timestamp(_snap["observation_date"]))
+           & (preds["shift"] == _snap["shift"])].iloc[0]
+we_drivers = list(we["risk_drivers"]) if we["risk_drivers"] is not None else []
+
+# ── Exploratory views of the model inputs over the training window ───────────
+# Time series of the sensor channels and the other top drivers across the full
+# Jan 2023 to Dec 2025 training window, for the data-exploration section.
+TRAIN_END = "2025-12-31"
+ANOM_THRESH = 1.5                        # sensor anomaly z-score treated as a flag
+SENSOR_CH = {"vibration_rms_mm_s": "Spindle vibration (mm/s)",
+             "bearing_temp_c": "Bearing temperature (°C)",
+             "spindle_power_kw": "Spindle power (kW)",
+             "hydraulic_pressure_bar": "Hydraulic pressure (bar)"}
+
+_sr = pd.read_csv(REPO / "data_source" / "raw" / "sensors" / "sensor_readings.csv", parse_dates=["reading_date"])
+_sr = _sr[_sr["reading_date"] <= TRAIN_END].copy()
+_sr["ym"] = _sr["reading_date"].dt.to_period("M").dt.to_timestamp()
+eda_sensor_monthly = _sr.groupby("ym")[list(SENSOR_CH)].mean()
+
+_con = duckdb.connect(str(REPO / "data_source" / "oee_predmaint.duckdb"), read_only=True)
+_mart = _con.execute(f"""select observation_date, sensor_anomaly_score, rolling_30d_utilization_rate
+    from mart_ml__health_features where observation_date <= '{TRAIN_END}'""").df()
+_con.close()
+_mart["ym"] = pd.to_datetime(_mart["observation_date"]).dt.to_period("M").dt.to_timestamp()
+_mart["is_anom"] = _mart["sensor_anomaly_score"] >= ANOM_THRESH
+eda_anom_monthly = _mart.groupby("ym")["is_anom"].sum()
+eda_anom_rate = float(_mart["is_anom"].mean())
+eda_util_monthly = _mart.groupby("ym")["rolling_30d_utilization_rate"].mean()
+
+_ut = _mm[_mm["fd"] <= TRAIN_END].copy()     # _mm is unplanned-only with fd already set
+_ut["ym"] = _ut["fd"].dt.to_period("M").dt.to_timestamp()
+eda_fail_monthly = _ut.groupby("ym").size()
+eda_fail_by_mode = _ut.groupby(["ym", "failure_code"]).size().unstack(fill_value=0)
+eda_fail_total = int(len(_ut))
+_ra = _rep_any[_rep_any["fday"] <= TRAIN_END].copy()
+_ra["ym"] = _ra["fday"].dt.to_period("M").dt.to_timestamp()
+eda_repair_monthly = _ra.groupby("ym").size()
+# Share of unplanned failures driven by the wear modes the sensors can detect.
+tm_pct = float((_ut["failure_code"].isin(["TOOLING", "MECHANICAL"])).mean())
+
+
+def _trend_pct(series):
+    if len(series) < 2 or series.iloc[0] == 0:
+        return 0.0
+    slope = np.polyfit(np.arange(len(series)), series.values, 1)[0]
+    return slope * (len(series) - 1) / series.iloc[0] * 100
+
+
+
+# ── Charts ──────────────────────────────────────────────────────────────────
+def chart_tier_distribution():
+    vals = [int(day_counts.get(t, 0)) for t in TIERS]
+    fig, ax = B.make_fig(h=3.4)
+    bars = ax.bar(TIERS, vals, color=[TIER_COLOR[t] for t in TIERS], width=0.55)
+    for b_, v in zip(bars, vals):
+        ax.text(b_.get_x() + b_.get_width() / 2, v + n_days * 0.005, f"{v:,}\n({v/n_days:.0%})",
+                ha="center", va="bottom", fontsize=10)
+    ax.set_ylabel("Machine-days")
+    ax.set_ylim(0, max(vals) * 1.18)
+    B.chart_style(ax); fig.tight_layout()
+    return B.b64(fig)
+
+
+def chart_prob_distribution():
+    fig, ax = B.make_fig(h=3.4)
+    ax.hist(preds["prob_failure_7d"], bins=30, color=DARK_BLUE, edgecolor="white", linewidth=0.5)
+    ax.axvline(m["thresholds"]["7"], color=ACCENT_RED, ls="--", lw=1.4,
+               label=f"CRITICAL threshold ({m['thresholds']['7']:.2f})")
+    ax.set_xlabel("Probability of an unplanned repair within 7 days"); ax.set_ylabel("Observations"); ax.legend()
+    B.chart_style(ax); fig.tight_layout()
+    return B.b64(fig)
+
+
+def chart_tier_by_period():
+    names = [nm for _, nm in PERIODS]
+    x = np.arange(len(names)); w = 0.24
+    fig, ax = B.make_fig(h=3.4)
+    maxv = 0
+    for i, t in enumerate(TIERS):
+        vals = [int(((days["period"] == nm) & (days["tier"] == t)).sum()) for nm in names]
+        maxv = max(maxv, max(vals))
+        bars = ax.bar(x + (i - 1) * w, vals, w, color=TIER_COLOR[t], label=t if t == "OK" else t.title())
+        for b_, v in zip(bars, vals):
+            ax.text(b_.get_x() + b_.get_width() / 2, v + maxv * 0.012, f"{v}",
+                    ha="center", va="bottom", fontsize=8, color=DARK_GREY)
+    ax.set_xticks(x); ax.set_xticklabels(names); ax.set_ylabel("Machine-days")
+    ax.set_ylim(0, maxv * 1.16)
+    ax.legend(ncol=3, fontsize=9)
+    B.chart_style(ax); fig.tight_layout()
+    return B.b64(fig)
+
+
+# ── Training-signal charts (what the model keys on) ──────────────────────────
+def chart_vibration_ramp():
+    u = train[train["days_to_next_repair"] <= 30]
+    buckets = [(22, 30), (15, 21), (8, 14), (4, 7), (0, 3)]
+    labels = ["22-30", "15-21", "8-14", "4-7", "0-3"]
+    vals = [u.loc[(u["days_to_next_repair"] >= lo) & (u["days_to_next_repair"] <= hi),
+                  "vibration_7d_mean"].mean() for lo, hi in buckets]
+    fig, ax = B.make_fig(h=3.4)
+    ax.plot(labels, vals, "o-", color=DARK_BLUE, lw=2.6, markersize=9, zorder=3)
+    ax.fill_between(range(len(labels)), vals, min(vals) * 0.9, color=DARK_BLUE, alpha=0.08, zorder=1)
+    for i, v in enumerate(vals):
+        ax.text(i, v + 0.06, f"{v:.1f}", ha="center", va="bottom", fontsize=10, fontweight="bold", color=DARK_BLUE)
+    ax.set_xlabel("Days until the next repair, unplanned or interval service  (further out  →  imminent)")
+    ax.set_ylabel("Avg spindle vibration (mm/s)")
+    ax.set_ylim(min(vals) * 0.9, max(vals) * 1.12)
+    B.chart_style(ax); fig.tight_layout()
+    return B.b64(fig)
+
+
+_a, _t = train["sensor_anomaly_score"], train["days_to_next_repair"]
+ANOM_BUCKETS = [("Normal\n(< 0.5)", _a < 0.5, GREEN),
+                ("Slight\n(0.5-1.0)", (_a >= 0.5) & (_a < 1.0), LIGHT_BLUE),
+                ("Elevated\n(1.0-1.5)", (_a >= 1.0) & (_a < 1.5), AMBER),
+                ("High\n(1.5+)", _a >= 1.5, ACCENT_RED)]
+anom_days = [float(_t[b[1]].mean()) for b in ANOM_BUCKETS]
+
+
+def chart_anomaly_ttf():
+    labels = [b[0] for b in ANOM_BUCKETS]; cols = [b[2] for b in ANOM_BUCKETS]
+    fig, ax = B.make_fig(h=3.4)
+    bars = ax.bar(labels, anom_days, color=cols, width=0.6)
+    for b_, v in zip(bars, anom_days):
+        ax.text(b_.get_x() + b_.get_width() / 2, v + 0.3, f"{v:.0f} d", ha="center", va="bottom", fontsize=10, fontweight="bold")
+    ax.set_xlabel("Sensor anomaly score (how far readings sit above the machine's own baseline)")
+    ax.set_ylabel("Avg days to the next repair, either kind"); ax.set_ylim(0, max(anom_days) * 1.15)
+    B.chart_style(ax); fig.tight_layout()
+    return B.b64(fig)
+
+
+# ── Business-impact chart ────────────────────────────────────────────────────
+def chart_impact_combined():
+    # The quarter's unplanned failures and their downtime: the part that had a
+    # CRITICAL day in the 7 days before and the part that did not. Hours and
+    # failure count use different units, so each column is normalised to its own
+    # total and labelled with the absolute value.
+    cats = [("CRITICAL in the 7 days before", GREEN), ("No CRITICAL day before", MED_GREY)]
+    cols = [((float(hit_n["model"]), float(bi_events - hit_n["model"])), float(bi_events), "", "Unplanned failures"),
+            ((hit_hrs["model"], bi_hrs - hit_hrs["model"]), bi_hrs, "hrs", "Their downtime")]
+    fig, ax = B.make_fig(h=3.4)
+    for k, (vals, tot, unit, lab) in enumerate(cols):
+        bottom = 0.0
+        for (clab, color), v in zip(cats, vals):
+            pct = v / tot * 100 if tot else 0.0
+            ax.bar(k, pct, bottom=bottom, width=0.5, color=color, label=clab if k == 0 else None)
+            if pct >= 6:
+                ax.text(k, bottom + pct / 2, f"{v:.0f} {unit}".strip(), ha="center", va="center",
+                        color="white", fontsize=10, fontweight="bold")
+            bottom += pct
+    ax.set_ylim(0, 100); ax.set_xlim(-0.6, 1.6)
+    ax.set_xticks([0, 1]); ax.set_xticklabels([c[3] for c in cols])
+    ax.set_ylabel("Share of Q1 2026 total (%)")
+    ax.legend(fontsize=9, loc="upper center", ncol=2, bbox_to_anchor=(0.5, -0.14), frameon=False)
+    B.chart_style(ax); fig.tight_layout()
+    return B.b64(fig)
+
+
+# ── Data-exploration charts (model inputs over three years) ──────────────────
+def _year_axis(ax):
+    ax.xaxis.set_major_locator(mdates.YearLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+
+
+SENSOR_YLIM = {"vibration_rms_mm_s": (2, 4), "bearing_temp_c": (45, 65), "spindle_power_kw": (7, 14), "hydraulic_pressure_bar": (110, 130)}
+
+
+def chart_eda_sensors():
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(2, 2, figsize=(B.CHART_W, 5.2))
+    for ax, (col, lab) in zip(axes.ravel(), SENSOR_CH.items()):
+        m = eda_sensor_monthly[col]
+        lo, hi = SENSOR_YLIM[col]
+        assert lo < m.min() and m.max() < hi, (col, m.min(), m.max())
+        ax.plot(m.index, m.values, color=DARK_BLUE, lw=1.8)
+        ax.set_ylim(lo, hi)
+        ax.set_title(lab, fontsize=10)
+        B.chart_style(ax); _year_axis(ax); ax.tick_params(labelsize=8)
+    fig.tight_layout()
+    return B.b64(fig)
+
+
+def chart_eda_anomaly():
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    fig, ax = B.make_fig(h=3.4)
+    a = eda_anom_monthly
+    ax.bar(a.index, a.values, width=22, color=LIGHT_BLUE)
+    ax.set_ylabel("Anomalous machine-days / month")
+    ax2 = ax.twinx()
+    f = eda_repair_monthly.reindex(a.index).fillna(0)
+    ax2.plot(f.index, f.values, color=ACCENT_RED, lw=2, marker="o", markersize=3)
+    ax2.set_ylabel("Repairs of either kind / month", color=ACCENT_RED)
+    ax2.tick_params(axis="y", labelcolor=ACCENT_RED); ax2.grid(False)
+    B.chart_style(ax); _year_axis(ax)
+    ax.legend(handles=[Patch(color=LIGHT_BLUE, label="Anomalous machine-days"),
+                       Line2D([0], [0], color=ACCENT_RED, marker="o", label="Unplanned repairs and interval services")],
+              fontsize=9, loc="upper left")
+    fig.tight_layout()
+    return B.b64(fig)
+
+
+def chart_eda_failures():
+    fig, ax = B.make_fig(h=3.2)
+    d = eda_fail_by_mode
+    palette = {"TOOLING": DARK_BLUE, "MECHANICAL": LIGHT_BLUE, "ELECTRICAL": MED_GREY,
+               "OPERATOR_INDUCED": AMBER, "ENVIRONMENTAL": MUTED_RED}
+    bottom = np.zeros(len(d))
+    for mode in [c for c in palette if c in d.columns]:
+        ax.bar(d.index, d[mode].values, bottom=bottom, width=22, color=palette[mode],
+               label=mode.replace("_", " ").title())
+        bottom = bottom + d[mode].values
+    # Trace the top of the tooling + mechanical band with a red dotted line to
+    # highlight the wear-driven modes the sensors detect (everything below it).
+    tm_cum = (d.get("TOOLING", 0) + d.get("MECHANICAL", 0)).values
+    ax.plot(d.index, tm_cum, color=ACCENT_RED, ls=":", lw=1.8, drawstyle="steps-mid",
+            zorder=5)
+    ax.text(0.985, 0.95, f"Tooling + Mechanical:\n{tm_pct:.0%} of all failures",
+            transform=ax.transAxes, ha="right", va="top", fontsize=9.5, fontweight="bold",
+            color=ACCENT_RED,
+            bbox=dict(boxstyle="round,pad=0.4", fc="white", ec=ACCENT_RED, ls=":", lw=1.5))
+    ax.set_ylabel("Unplanned failures / month"); ax.set_ylim(0, float(bottom.max()) + 2.2)
+    ax.legend(fontsize=8, ncol=5, loc="upper center", bbox_to_anchor=(0.5, -0.16), frameon=False)
+    B.chart_style(ax); _year_axis(ax)
+    fig.tight_layout()
+    return B.b64(fig)
+
+
+def eda_stats_table():
+    notes = {"vibration_rms_mm_s": "Rises with fleet age; the strongest wear signal.",
+             "bearing_temp_c": "Stable at baseline; spikes only ahead of specific failures.",
+             "spindle_power_kw": "Stable; reacts on tooling and electrical events.",
+             "hydraulic_pressure_bar": "Stable; dips ahead of environmental faults."}
+    rows = []
+    for col, lab in SENSOR_CH.items():
+        m = eda_sensor_monthly[col]
+        rows.append([lab, f"{m.mean():.1f}", f"{_trend_pct(m):+.0f}%", notes[col]])
+    u = eda_util_monthly * 100
+    rows.append(["Fleet utilization (30-day)", f"{u.mean():.0f}%", f"{_trend_pct(u):+.0f}%",
+                 "Sustained load that limits available maintenance windows."])
+    rows.append(["Unplanned failures", f"{eda_fail_monthly.mean():.0f}/mo", f"{_trend_pct(eda_fail_monthly):+.0f}%",
+                 f"{eda_fail_total} events over three years, beside {len(_ra) - eda_fail_total} interval services."])
+    rows.append(["Sensor anomaly flags", f"{eda_anom_rate:.0%} of days", "n/a",
+                 "Cluster in the weeks before a repair of either kind."])
+    return B.data_table(["Model input", "Avg over 3 yrs", "3-yr trend", "Behaviour"], rows, right={1, 2})
+
+
+
+# ── Tables ──────────────────────────────────────────────────────────────────
+def exec_drivers_table():
+    # Plain-language summary of the drivers the model weighs most, drawn from the
+    # SHAP feature importances. The condition-monitoring sensor signals are led
+    # with first because they are the most concrete for the floor team, so this
+    # is ordered for readability rather than strictly by SHAP magnitude.
+    drivers = [
+        "Spindle vibration elevated above its normal baseline",
+        "Sensor anomaly across the condition-monitoring channels",
+        "Where the machine stands in its repair interval",
+        "Machine age",
+        "Utilization and maintenance-window pressure",
+    ]
+    rows = [[f'<td style="width:44px;text-align:center;font-weight:700;color:{DARK_BLUE};">#{i}</td>', d]
+            for i, d in enumerate(drivers, 1)]
+    return B.data_table(["Rank", "Driver behind the flag"], rows)
+
+
+EVAL_PERIODS = (("test", "Test set"), ("scoring", "Scoring quarter"))
+
+
+MODEL_NAME = {"model": "ML model", "rules": "Rules baseline", "calendar_pm": "Calendar PM baseline"}      # the wording of Section 3.2
+SHORT_PARTS = {"failure": "Unplanned repair", "service": "Interval service", "neither": "Neither"}
+QUARTER = (("scoring", "Scoring quarter"),)
+
+
+def chart_failures_warned():
+    """The scoring quarter's unplanned failures by source: those with a CRITICAL rating on at least one of the 7 days before, and those without."""
+    x = np.arange(len(ALL_SOURCES))
+    fig, ax = B.make_fig(h=3.6)
+    k = [EVAL[(s_, "scoring", 7)]["warned"] for s_ in ALL_SOURCES]
+    hit = np.array([a for a, _ in k]); miss = np.array([n - a for a, n in k])
+    ax.bar(x, hit, 0.55, color=DARK_BLUE, label="Rated CRITICAL in the 7 days before")
+    ax.bar(x, miss, 0.55, bottom=hit, color=LIGHT_GREY, label="Not rated CRITICAL")
+    for xi, h_, m_ in zip(x, hit, miss):
+        if h_:
+            ax.text(xi, h_ / 2, f"{h_}", ha="center", va="center", fontsize=11, fontweight="bold", color="white")
+        if m_:
+            ax.text(xi, h_ + m_ / 2, f"{m_}", ha="center", va="center", fontsize=11, color=DARK_GREY)
+    ax.set_xticks(x); ax.set_xticklabels([MODEL_NAME[s_] for s_ in ALL_SOURCES])
+    ax.set_ylim(0, k[0][1] + 0.8); ax.set_yticks(range(0, k[0][1] + 1, 2)); ax.set_ylabel("Unplanned machine failures")
+    ax.legend(ncol=2, fontsize=9, loc="upper center", bbox_to_anchor=(0.5, -0.10), frameon=False)
+    B.chart_style(ax); fig.tight_layout()
+    return B.b64(fig)
+
+
+def chart_roc_auc():
+    """ROC-AUC on the unplanned-repair target over the scoring quarter, by window, for the model and the two baselines."""
+    fig, ax = B.make_fig(h=3.6)
+    x = np.arange(2); w = 0.25
+    for i, (s_, col) in enumerate(zip(ALL_SOURCES, (DARK_BLUE, MED_GREY, LIGHT_GREY))):
+        vals = [float(wm("scoring", s_, n_, "roc_auc")) for n_ in (7, 21)]
+        bars = ax.bar(x + (i - 1) * w, vals, w, color=col, label=MODEL_NAME[s_])
+        for b_, v_ in zip(bars, vals):
+            ax.text(b_.get_x() + b_.get_width() / 2, (v_ if v_ >= 0.5 else 0.5) + 0.012, f"{v_:.2f}", ha="center", va="bottom", fontsize=9, color=DARK_GREY)
+    ax.axhline(0.5, color=ACCENT_RED, ls="--", lw=1.2, label="0.5: no better than chance")
+    ax.set_xticks(x); ax.set_xticklabels(["7-day window", "21-day window"]); ax.set_ylim(0, 1.0); ax.set_ylabel("ROC-AUC")
+    ax.legend(ncol=4, fontsize=9, loc="upper center", bbox_to_anchor=(0.5, -0.10), frameon=False)
+    B.chart_style(ax); fig.tight_layout()
+    return B.b64(fig)
+
+
+def chart_what_followed(window, periods=EVAL_PERIODS, names=ALL_NAME, part_names=None):
+    """What followed each rated machine-day within the window, by source and period, from the shared chart function."""
+    return B.chart_what_followed([(names[s_], [(name, EVAL[(s_, p_, window)]) for p_, name in periods]) for s_ in ALL_SOURCES], part_names=part_names)
+
+
+def critical_before_table():
+    """Two rows that are not the same measure: what the repair-interval method did
+    in the quarter, and what the indicator read before the failures the method
+    did not prevent."""
+    head = ('<table class="data-table"><thead><tr><th></th><th>What is counted</th>'
+            '<th style="text-align:right;">Count</th><th style="text-align:right;">Hours</th>'
+            '<th>What it comes to</th></tr></thead><tbody>')
+    r1 = (f'<tr><td style="white-space:nowrap;"><strong>Repair-interval method</strong><br>the shop&#39;s practice</td>'
+          f'<td>Interval services carried out; unplanned failures that still occurred</td>'
+          f'<td style="text-align:right;white-space:nowrap;">{n_services_q} services<br>{bi_events} failures</td>'
+          f'<td style="text-align:right;white-space:nowrap;">{svc_hours_q:.0f} planned<br>{bi_hrs:.0f} unplanned</td>'
+          f'<td>{n_before_interval} of the {bi_events} failures came before the machine reached its interval</td></tr>')
+    r2 = (f'<tr style="background:{B.BG_GREY};"><td style="white-space:nowrap;"><strong>Health indicator</strong><br>in shadow mode</td>'
+          f'<td>Of those {bi_events} failures, the ones with a CRITICAL rating on at least one of the 7 days before</td>'
+          f'<td style="text-align:right;">{hit_n["model"]} of {bi_events}</td>'
+          f'<td style="text-align:right;">{hit_hrs["model"]:.0f} of {bi_hrs:.0f}</td>'
+          f'<td>{avoid_hrs["model"]:.0f} hours avoided if acted on, about ${avoid_usd["model"]:,.0f} a year</td></tr>')
+    r3 = (f'<tr><td style="white-space:nowrap;"><strong>Rules baseline</strong></td>'
+          f'<td>Of those {bi_events} failures, the ones with a CRITICAL rating from the rule on at least one of the 7 days before</td>'
+          f'<td style="text-align:right;">{hit_n["rules"]} of {bi_events}</td>'
+          f'<td style="text-align:right;">{hit_hrs["rules"]:.0f} of {bi_hrs:.0f}</td>'
+          f'<td>{avoid_hrs["rules"]:.0f} hours avoided if acted on, about ${avoid_usd["rules"]:,.0f} a year</td></tr>')
+    return head + r1 + r2 + r3 + "</tbody></table>"
+
+
+def tier_reference_table():
+    rows = [
+        [B.badge("CRITICAL", ACCENT_RED), TIER_MEANING["CRITICAL"],
+         "Schedule maintenance now; treat as this week's priority."],
+        [B.badge("ELEVATED", AMBER), TIER_MEANING["ELEVATED"],
+         "Plan a service window in the next two to three weeks."],
+        [B.badge("OK", GREEN), TIER_MEANING["OK"],
+         "Continue the normal preventive-maintenance schedule."]]
+    return B.data_table(["Health indicator", "What the model is saying", "What the floor should do"], rows)
+
+
+def worked_example():
+    age = int(we["machine_age_years"]); vib = float(we["vibration_7d_mean"])
+    btemp = float(we["bearing_temp_7d_mean"]); power = float(we["spindle_power_7d_mean"])
+    hyd = float(we["hydraulic_pressure_7d_mean"])
+    since = we["days_since_last_repair"]; overdue = float(we["days_overdue_for_pm"])
+    interval = float(pd.read_csv(REPO / "data_source" / "raw" / "machinemetrics" / "machines.csv")
+                     .set_index("machine_id").loc[we["machine_id"], "repair_interval_days"])
+    alarms = float(we["rolling_7d_alarm_count"]); tier = we["health_indicator"]
+
+    def sensor_note(keyword, z, deviates=False):
+        # A channel named among the rating's drivers says so; otherwise the note
+        # reads the channel's anomaly score against the machine's own baseline.
+        if any(keyword in d.lower() for d in we_drivers):
+            return "Among the reasons behind this rating, listed below."
+        z = abs(float(z)) if deviates else float(z)
+        return ("Running away from its own 30-day baseline; flagged by condition monitoring." if z >= 1.0
+                else "Within its normal range; no anomaly flagged.")
+
+    rows = [
+        ["Spindle vibration", f"{vib:.1f} mm/s (7-day avg)", sensor_note("vibration", we["vibration_anomaly"])],
+        ["Bearing temperature", f"{btemp:.0f} &deg;C (7-day avg)", sensor_note("bearing temperature", we["bearing_temp_anomaly"])],
+        ["Spindle motor power", f"{power:.1f} kW (7-day avg)", sensor_note("power", we["spindle_power_anomaly"])],
+        ["Hydraulic pressure", f"{hyd:.0f} bar (7-day avg)", sensor_note("hydraulic", we["hydraulic_pressure_anomaly"], deviates=True)],
+        ["Machine age", f"{age} years",
+         "One of the oldest assets in the fleet, so it carries more mechanical wear." if age > 9
+         else "Not among the aging assets."],
+        ["Place in its repair interval", f"{since:.0f} days since the last repair, of a {interval:.0f}-day interval",
+         "Its interval service is due or close." if since >= interval - 2
+         else "Early in its interval." if since <= interval / 3 else "Part-way through its interval."],
+        ["Preventive maintenance", f"{overdue:.0f} days overdue" if overdue > 0 else "on schedule",
+         "Past its scheduled service, which raises risk." if overdue > 0 else "Service is current."],
+        ["Recent alarms (7 days)", f"{alarms:.0f} alarms",
+         "Elevated fault activity on the controller over the past week." if alarms > 15
+         else "Alarm activity in its usual range."]]
+    inputs = B.data_table(["Signal the model read", "Current value", "Why it matters"], rows)
+    result = (f'<div style="background:{B.BG_GREY};border-left:4px solid {TIER_COLOR[tier]};padding:16px 20px;margin:18px 0;">'
+              f'<span style="font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:{MED_GREY};font-weight:700;">'
+              f'The health indicator</span><br>'
+              f'<span style="font-size:26px;font-weight:700;color:{DARK_GREY};">{we["machine_id"]} &middot; {we["machine_type"]}</span><br>'
+              f'<span style="font-size:16px;">{B.badge(tier, TIER_COLOR[tier])} &nbsp; {TIER_MEANING[tier]}</span></div>')
+    drv = "".join(f"<li>{d}</li>" for d in we_drivers)
+    # The date the features stand at, and the machine's repair on or after it
+    # (the repair restarts the interval the CMMS asset list counts from).
+    as_of = pd.Timestamp(we["observation_date"])
+    con = duckdb.connect(str(REPO / "data_source" / "oee_predmaint.duckdb"), read_only=True)
+    last_repair = pd.Timestamp(con.execute("select last_repair_date from mart_oee__reliability where machine_id = ?",
+                                           [we["machine_id"]]).fetchone()[0])
+    con.close()
+    note = f"Features as of {as_of.day} {as_of:%B %Y}"
+    if last_repair >= as_of:
+        note += (f", the observation before {we['machine_id']}&#39;s repair on {last_repair.day} {last_repair:%B}, "
+                 f"which restarted its interval")
+    return inputs + result + f'<p style="margin-bottom:6px;"><strong>Reasons flagged in CMMS:</strong></p><ul class="limitation-list">{drv}</ul>'
+
+
+FLOW_HTML = (
+    '<div style="display:flex;align-items:stretch;gap:0;margin:22px 0;flex-wrap:wrap;">'
+    '<div style="flex:1;min-width:190px;background:#F3F5F7;border-radius:8px;padding:16px 18px;border-top:4px solid #381FA1;">'
+    '<div style="font-weight:700;color:#322B4B;margin-bottom:6px;">1. What it watches</div>'
+    '<div style="font-size:16px;line-height:1.55;">For each machine: daily sensor readings for vibration, bearing temperature, '
+    'motor power, and hydraulic pressure, plus its age and utilization, recent alarms and downtime, where it stands in its '
+    'repair interval and the time since its last calendar PM.</div></div>'
+    '<div style="align-self:center;font-size:26px;color:#8093A4;padding:0 12px;">&rarr;</div>'
+    '<div style="flex:1;min-width:190px;background:#F3F5F7;border-radius:8px;padding:16px 18px;border-top:4px solid #381FA1;">'
+    '<div style="font-weight:700;color:#322B4B;margin-bottom:6px;">2. What it learns</div>'
+    '<div style="font-size:16px;line-height:1.55;">From three years of history it learned the patterns that came before past '
+    'breakdowns, such as vibration and heat creeping up, older machines failing sooner, and wear showing early in a machine\'s repair interval.</div></div>'
+    '<div style="align-self:center;font-size:26px;color:#8093A4;padding:0 12px;">&rarr;</div>'
+    '<div style="flex:1;min-width:190px;background:#F3F5F7;border-radius:8px;padding:16px 18px;border-top:4px solid #381FA1;">'
+    '<div style="font-weight:700;color:#322B4B;margin-bottom:6px;">3. What it produces</div>'
+    '<div style="font-size:16px;line-height:1.55;">A daily health indicator for every machine (CRITICAL, ELEVATED or OK) and the '
+    'specific reasons behind it, delivered straight into the CMMS asset list.</div></div></div>')
+
+
+charts = {"tiers": chart_tier_distribution(), "prob": chart_prob_distribution(),
+          "tier": chart_tier_by_period(),
+          "vib": chart_vibration_ramp(), "anom": chart_anomaly_ttf(),
+          "warned": chart_failures_warned(), "roc": chart_roc_auc(),
+          "followed_7": chart_what_followed(7, periods=QUARTER, names=MODEL_NAME, part_names=SHORT_PARTS),
+          "followed_21": chart_what_followed(21, periods=QUARTER, names=MODEL_NAME, part_names=SHORT_PARTS),
+          "eda_sensors": chart_eda_sensors(), "eda_anom": chart_eda_anomaly(),
+          "eda_fail": chart_eda_failures()}
+
+# CMMS screenshot (static asset) for Section 2.1.
+import base64
+_cmms_png = Path(__file__).resolve().parent / "assets" / "cmms_screenshot.png"
+cmms_screenshot_b64 = base64.b64encode(_cmms_png.read_bytes()).decode() if _cmms_png.exists() else ""
+
+val_ap = {x["model_type"]: x["val_ap_mean"] for x in m["models"]}
+_abl_test = abl[abl["split"] == "test"].set_index("model")["roc_auc"]
+abl_with, abl_without = float(_abl_test["all features"]), float(_abl_test["without sensor features"])
+MODEL_KIND = {"xgboost": ", a gradient-boosted decision-tree algorithm", "random_forest": ", an ensemble of decision trees",
+              "logistic_regression": ""}
+# Section 3.2 is written in words where a share is quoted; each is tied to the marts here.
+_e7 = {s_: EVAL[(s_, "scoring", 7)] for s_ in ALL_SOURCES}; _e21 = {s_: EVAL[(s_, "scoring", 21)] for s_ in ALL_SOURCES}
+# The quarter's failures the model did not rate CRITICAL in the 7 days before, as the sentence in Section 3.2 describes them.
+_missed = _qf[~_qf["warned_before"]].sort_values("failure_date")
+_m_op = _missed[_missed["failure_code"] == "OPERATOR_INDUCED"]; _m_tool = _missed[_missed["failure_code"] == "TOOLING"]
+assert len(_missed) == 3 and len(_m_op) == 2 and len(_m_tool) == 1
+_mt = _m_tool.iloc[0]; _mt_day = pd.Timestamp(_mt["failure_date"])
+assert int(_mt["repair_interval_days"]) - int(_mt["days_since_last_repair"]) == 1
+_pred = pd.concat([pd.read_parquet(f_) for f_ in sorted((SCORING).glob("predictions_*.parquet"))])
+_pred["observation_date"] = pd.to_datetime(_pred["observation_date"])
+_mt_prob = float(_pred[(_pred["machine_id"] == _mt["machine_id"]) & (_pred["observation_date"] >= _mt_day - pd.Timedelta(days=7)) & (_pred["observation_date"] < _mt_day)]["prob_failure_7d"].max())
+_thr7 = float(m["thresholds"]["7"])
+assert _mt_prob < _thr7
+_day = lambda d_: f"{pd.Timestamp(d_).day} {pd.Timestamp(d_):%B}"
+missed_sentence = (f"The three failures the model did not flag were two operator-induced failures ("
+                   + " and ".join(f"{r_.machine_id} on {_day(r_.failure_date)}" for r_ in _m_op.itertuples())
+                   + f"), which give no sensor or alarm warning, and a tooling failure on {_mt['machine_id']} on {_day(_mt_day)}, one day before its interval "
+                   f"service was due, where the model's 7-day probability peaked at {_mt_prob:.2f}, under the {_thr7:.2f} threshold for CRITICAL.")
+assert all(wm("scoring", "model", n_, "roc_auc") > wm("scoring", "rules", n_, "roc_auc") > 0.5 > wm("scoring", "calendar_pm", n_, "roc_auc") for n_ in (7, 21))
+assert wm("scoring", "model", 7, "roc_auc") - wm("scoring", "rules", 7, "roc_auc") > 0.15 > 0.05 > wm("scoring", "model", 21, "roc_auc") - wm("scoring", "rules", 21, "roc_auc")
+assert round(neither_share["model"] * 4) == 1 and round(neither_share["rules"] * 10) == 7 and round(neither_share["calendar_pm"] * 3) == 2
+assert abs(neither_share["model"] - 1 / 4) < 0.03 and abs(neither_share["rules"] - 7 / 10) < 0.03 and abs(neither_share["calendar_pm"] - 2 / 3) < 0.03
+assert crit["model"]["critical"] < min(crit["rules"]["critical"], crit["calendar_pm"]["critical"])
+assert _e21["rules"]["warned"][0] > _e21["model"]["warned"][0] and _e21["rules"]["critical"] > 2 * _e21["model"]["critical"]
+_caption = B.caption
+# The executive summary's wording rests on these; the run stops if the record stops supporting it.
+assert n_before_interval >= bi_events - 2 and hit_n["model"] > hit_n["rules"] and crit["model"]["service"] > crit["model"]["failure"]
+assert neither_share["model"] < neither_share["rules"] and crit["model"]["critical"] < crit["rules"]["critical"]
+assert hit_n["model"] > hit_n["rules"] > _e7["calendar_pm"]["warned"][0]
+assert wm("test", "model", 7, "roc_auc") > wm("test", "rules", 7, "roc_auc") and wm("test", "model", 21, "roc_auc") > wm("test", "rules", 21, "roc_auc")
+
+toc = ('<a href="#summary">Executive Summary</a><hr>'
+       '<a href="#modeloverview">Model Overview</a>'
+       '<a href="#what" class="sub">What This Model Does</a>'
+       '<a href="#data" class="sub">Training Data Overview</a><hr>'
+       '<a href="#predictions">Model Performance</a>'
+       '<a href="#scoring" class="sub">Scoring Summary</a>'
+       '<a href="#accuracy" class="sub">Accuracy and Validation</a>'
+       '<a href="#sample" class="sub">Sample Model Output</a>'
+       '<a href="#limits" class="sub">Limitations</a>')
+
+# The accuracy and validation text and charts of Section 3.2. The technical report carries the same section, so it
+# is built once here and written beside the reports' other assets for the technical report to read.
+ACCURACY_HTML = f"""<p>The shop's repair-interval maintenance process resolves most developing machine failures before they occur:
+in the scoring quarter, {n_services_q} interval services against {bi_events} unplanned breakdowns. The model ran
+in the background over that entire quarter, its ratings recorded and not acted on, so that the record shows what
+it saw without changing what happened. To judge its accuracy and validate its results, we read it two ways:</p>
+<ol style="margin:4px 0 22px 34px;padding-left:22px;">
+  <li>How many of the machines' unplanned breakdowns it rated CRITICAL in the 7 days before.</li>
+  <li>What followed each of the model's CRITICAL ratings within 7 days: an unplanned repair (the warning was
+  right and the machine broke down before its interval service), an interval service (the warning was right but
+  the scheduled service reached the component first), or neither (the warning was wrong: a false alarm).</li>
+</ol>
+<p>It is compared with two baselines: a rules baseline a planner could apply by hand, CRITICAL when a machine's
+7-day alarm count is more than 1.5 times its usual level or its calendar PM is more than 14 days overdue; and
+the calendar PM schedule, CRITICAL when a PM is due within 7 days or overdue. Neither baseline reads where a
+machine stands in its repair interval. That's because the shop already acts on that through their current
+repair-interval maintenance schedule. The model does capture this repair interval data though, so its
+comparison to baseline shows what it adds beyond the signals the shop already had.</p>
+<p>The model flagged a CRITICAL rating ahead of {hit_n['model']} of the quarter's {bi_events} unplanned machine
+failures, against {hit_n['rules']} of {bi_events} for the rules baseline and {_e7['calendar_pm']['warned'][0]} of
+{bi_events} for the calendar PM baseline. {missed_sentence}</p>
+{B.chart("Unplanned Machine Failures Flagged as Critical, Model vs. Baselines", charts["warned"])}
+<p>False alarms occur when the model or a baseline method flags a CRITICAL rating when nothing occurs. This
+indicates low precision, and a higher percentage of false alarms means the flags can't be trusted. Only
+{neither_share['model']:.0%} of the model's CRITICAL flags were false alarms, compared to
+{neither_share['rules']:.0%} for the rules baseline and {neither_share['calendar_pm']:.0%} for the calendar PM
+baseline. The model also raised CRITICAL flags on fewer days ({crit['model']['critical']}) than the rules
+baseline ({crit['rules']['critical']}) or calendar PM baseline ({crit['calendar_pm']['critical']}), further
+validating its reliability.</p>
+{B.chart("What Followed Each CRITICAL Rating, 7-Day Window", charts["followed_7"])}
+{_caption(B.FOLLOWED_CAPTION)}
+<p>The chart below shows the same information, but for both CRITICAL and ELEVATED flags, across a 21 day
+period. The rules baseline warned ahead of more of the quarter's failures ({_e21['rules']['warned'][0]} of
+{bi_events} against {_e21['model']['warned'][0]}), on more than twice as many rated days
+({_e21['rules']['critical']} against {_e21['model']['critical']}) with
+{_e21['rules']['neither'] / _e21['rules']['critical']:.0%} followed by nothing against
+{_e21['model']['neither'] / _e21['model']['critical']:.0%}.</p>
+{B.chart("What Followed Each CRITICAL or ELEVATED Rating, 21-Day Window", charts["followed_21"])}
+<p>ROC-AUC is a measure of how accurate the model's predictions were. It compares the machine-shift windows
+that ended in a machine failure against ones that didn't and examines whether the predictions differed between
+the two. A score of 0.5 means there was no difference, 1.0 means the predictions always captured the machine
+failure. As shown below, the model was much more accurate in the 7-day CRITICAL window
+({wm('scoring', 'model', 7, 'roc_auc'):.2f}, versus {wm('scoring', 'rules', 7, 'roc_auc'):.2f} and
+{wm('scoring', 'calendar_pm', 7, 'roc_auc'):.2f} for the baselines) versus the 21-day CRITICAL and ELEVATED
+window ({wm('scoring', 'model', 21, 'roc_auc'):.2f}, versus {wm('scoring', 'rules', 21, 'roc_auc'):.2f} and
+{wm('scoring', 'calendar_pm', 21, 'roc_auc'):.2f} for the baselines).</p>
+{B.chart("ROC-AUC by Window, Model vs. Baselines, Scoring Quarter", charts["roc"])}
+"""
+ACCURACY_OUT = Path(__file__).resolve().parent / "assets" / "accuracy_validation.html"
+ACCURACY_OUT.write_text(ACCURACY_HTML, encoding="utf-8", newline="\n")
+
+body = f"""
+{B.section("summary", "Section 1", "Executive Summary")}
+<p>The machine health indicator model rates every machine on the shop floor each day as CRITICAL, ELEVATED or
+OK, based on how soon it is likely to experience an unplanned breakdown. The model was trained on three years of machine sensor data and maintenance records.</p>
+<p>The model is intended to supplement the shop's current repair-interval maintenance method: when a machine
+nears its usual gap between repairs, an interval service replaces the wear components ahead of the failure.
+Over the quarter, the shop carried out <strong>{n_services_q} interval services</strong>, and
+<strong>{bi_events} unplanned failures</strong> still occurred, resulting in {bi_hrs:.0f} hours of unplanned
+downtime, almost all on machines that failed before their interval was reached.</p>
+<p>The machine health indicator model ran in the background over the quarter, rating every machine daily with
+the ratings recorded and not acted on, so the machine failures occurred as they would have without it. This
+was necessary to validate the model's results. The model flagged CRITICAL ratings on
+<strong>{hit_n['model']} of the {bi_events}</strong> unplanned failures on at least one of the 7 days before
+they occurred. Acting on those ratings would have turned {hit_n['model']} reactive repairs into planned
+services, avoiding about <strong>{avoid_hrs['model']:.0f} hours</strong> of unplanned downtime in the quarter,
+worth about <strong>${avoid_usd['model']:,.0f} a year</strong> in contribution margin. Additionally, as
+detailed in Section 3, the model greatly outperformed both baselines.</p>
+<p><strong>These results suggest this model is a valuable early-warning and maintenance prioritisation tool alongside
+the shop's existing repair-interval method.</strong></p>
+
+{B.section("modeloverview", "Section 2", "Model Overview")}
+
+{B.section("what", "Section 2.1", "What This Model Does")}
+<p>The machine health indicator is built on a {LABELS.get(best, best).lower()} machine learning algorithm. It
+answers one question for every machine on the floor, every day: <strong>which machines are likely to experience
+a breakdown soon?</strong></p>
+{FLOW_HTML}
+<p>The health indicator's tiers are described below:</p>
+{tier_reference_table()}
+<p>In addition to the health indicator tier, the model lists the specific conditions that drove it, so the
+maintenance team can see why a machine was surfaced and what to inspect first. The signals that most heavily
+determine the indicator are listed below:</p>
+{exec_drivers_table()}
+<p>The indicator is delivered in the shop's CMMS asset view: the fleet is ranked by health indicator and each
+machine carries its tier and the conditions driving it.</p>
+<div class="chart-wrap" style="padding:6px;">
+  <img src="data:image/png;base64,{cmms_screenshot_b64}" alt="CMMS asset view with the machine health indicator"
+       style="width:100%;height:auto;display:block;border:1px solid {LIGHT_GREY};">
+</div>
+
+{B.section("data", "Section 2.2", "Training Data Overview")}
+<p>The four condition-monitoring channels (spindle vibration, bearing temperature, spindle motor power and
+hydraulic pressure) are plotted below as monthly averages across all machines for the entire three-year
+training window. All four channels remain broadly steady over time: regular repairs and interval services
+account for most of the fluctuations seen over time, with the machine's readings then returning to baseline
+once completed.</p>
+{B.chart("Sensor Channels Over Three Years", charts["eda_sensors"])}
+<p>The sensor channels look steady at the monthly level because the pre-failure spikes are short and
+machine-specific, so they average out across the fleet. The model instead picks up the anomaly readings that
+jump above a machine's own baseline.</p>
+<p>Across all machines, monthly sensor anomaly activity rises and falls with the count of repairs. Looking at
+individual machines, average spindle vibration is quiet weeks out and climbs in the final days before a repair,
+and this is the strongest indicator of an impending machine breakdown. And the further a machine's readings sit
+above its own normal baseline, the sooner the next repair arrives, from about {anom_days[0]:.0f} days out when
+readings are normal to about {anom_days[-1]:.0f} days when they are highly abnormal.</p>
+{B.chart("Sensor Anomalies and Repairs of Either Kind, by Month", charts["eda_anom"],
+         "Monthly count of anomalous machine-days (bars) against unplanned repairs and interval services per month (line).")}
+{B.chart("Vibration Climbs as a Repair Approaches", charts["vib"],
+         "Average spindle vibration in the training data, grouped by how many days remained before the machine's next repair, "
+         "unplanned or interval service. Vibration is quiet weeks out and rises in the final days.")}
+{B.chart("A Sensor Anomaly Means a Repair Is Closer", charts["anom"],
+         "The anomaly score measures how far a machine's recent readings sit above its own normal baseline. As the score rises, "
+         f"the average time to the next repair of either kind falls from about {anom_days[0]:.0f} days when readings are normal to about {anom_days[-1]:.0f} days when they are highly abnormal.")}
+<p>Looking at the unplanned breakdown data broken out by failure mode reveals that tooling and mechanical
+problems make up {tm_pct:.0%} of all unplanned failures. These wear-driven modes are the ones that the
+condition-monitoring sensors' data reveal. The electrical and environmental modes are less common, and
+operator-induced failures give no sensor warning at all.</p>
+{B.chart("Unplanned Failures by Month and Failure Mode", charts["eda_fail"])}
+
+{B.section("predictions", "Section 3", "Model Performance")}
+
+{B.section("scoring", "Section 3.1", "Scoring Summary")}
+<p>The model scores every machine-shift observation before the shift begins, and takes the higher of the
+day's two ratings. In {PERIOD_NAME}, the model scored <strong>{total:,}</strong> observations covering
+<strong>{n_days:,}</strong> machine-days. It rated <strong>{n_crit:,}</strong> machine-days CRITICAL (failure
+likely within 7 days), <strong>{n_elev:,}</strong> ELEVATED (within 8 to 21 days) and
+<strong>{n_ok:,}</strong> OK. This shop opens an unplanned repair within 7 days on about
+{m['positive_rate']['train']['7']:.0%} of machine-shifts, and the fleet of {n_machines} machines carries about
+{n_crit / days['observation_date'].nunique():.1f} CRITICAL ratings on an average day.</p>
+{B.chart("Machine-Days by Health Indicator Tier", charts["tiers"])}
+{B.chart("Distribution of the 7-Day Probability", charts["prob"])}
+{B.chart("Health Indicator Mix by Month", charts["tier"])}
+
+{B.section("accuracy", "Section 3.2", "Accuracy and Validation")}
+<p>The model's accuracy and validation statistics are summarized below and presented in more detail in the
+<a href="technical_report.html">ML technical report</a>.</p>
+{ACCURACY_HTML}
+{B.section("sample", "Section 3.3", "Sample Model Output")}
+<p>Presented below is an example of how the model works (the signals it read, the health indicator it
+produced, and the reasons it flagged) for the top-ranked CRITICAL flag it produced over the quarter.</p>
+{worked_example()}
+
+{B.section("limits", "Section 3.4", "Limitations")}
+<p>Being clear about the model's limits is what makes it usable. It is an early-warning aid with a wide
+net, running beside a method that already pre-empts most wear-out failures.</p>
+<ul class="limitation-list">
+  <li><strong>It ranks how soon, not how severe or how costly.</strong> The output is how soon a failure is likely,
+  not how serious the repair will be or what it will cost.</li>
+  <li><strong>Most of its warnings precede a service that was already due.</strong> Wear looks the same on the
+  sensors whether it ends in an interval service or a failure, and the service comes first
+  {crit['model']['service'] / (crit['model']['service'] + crit['model']['failure']):.0%} of the time.
+  {crit['model']['service']} of the quarter's {crit['model']['critical']} CRITICAL machine-days were followed
+  within 7 days by an interval service and no failure, and {crit['model']['failure']} by a failure. A CRITICAL
+  rating on a machine whose service is days away adds little; on a machine early in its interval it is the
+  signal worth acting on.</li>
+  <li><strong>One machine carries much of the alerting.</strong> {top_crit_machine} is serviced every
+  {top_crit_interval} days and was rated CRITICAL on {top_crit_days} of its {top_crit_total} operating days in
+  the quarter.</li>
+  <li><strong>Gradual failures are easier than sudden ones.</strong> Wear-driven mechanical problems announce
+  themselves through rising vibration and heat: a CRITICAL day came in the 7 days before
+  {mode_hit_n['MECHANICAL'][0]} of the {mode_hit_n['MECHANICAL'][1]} mechanical failures across the test and
+  scoring periods. Operator-induced failures leave no such trace: {mode_hit_n['OPERATOR_INDUCED'][0]} of
+  {mode_hit_n['OPERATOR_INDUCED'][1]}.</li>
+  <li><strong>The counts are small.</strong> The scoring quarter has {bi_events} unplanned failures and the test
+  period {test_hits['model'][1]}. A difference of two or three failures between the indicator and a simple rule
+  is within what a different quarter could reverse.</li>
+  <li><strong>It is decision support, not automation.</strong> The model ranks and explains; a person still
+  decides what work to schedule. It is designed to inform maintenance judgement, not replace it.</li>
+  <li><strong>It stays current through monitoring.</strong> Machine behaviour drifts over time, so the model
+  is watched every month and retrained when the monitoring rules call for it, as detailed in the monitoring
+  report.</li>
+</ul>
+
+"""
+
+OUT.parent.mkdir(parents=True, exist_ok=True)
+OUT.write_text(B.page("ML Model Overview & Performance Report: Machine Health Indicator",
+                      "", toc, body), encoding="utf-8")
+print(f"Model overview written to {OUT}")

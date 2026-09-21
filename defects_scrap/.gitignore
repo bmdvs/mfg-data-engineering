@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Environment
+.env
+.venv/
+
+# dbt
+data_pipeline/profiles.yml
+data_pipeline/.user.yml
+data_pipeline/target/
+data_pipeline/dbt_packages/
+data_pipeline/logs/
+
+# DuckDB
+*.duckdb
+*.duckdb.wal
+
+# Working tables and notes from data preparation
+data_source/generate/truth/
+data_source/generate/DEVIATIONS.md

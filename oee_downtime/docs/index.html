@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Assets &middot; Machine Health</title>
+<style>
+  *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:#f1f3f5;
+    color:#212529; font-size:14px; }
+  .app { display:flex; min-height:100vh; }
+  /* Sidebar */
+  .side { width:210px; background:#1b2430; color:#c4ccd6; flex-shrink:0; display:flex; flex-direction:column; }
+  .brand { display:flex; align-items:center; gap:9px; padding:16px 18px; border-bottom:1px solid #2b3644; }
+  .brand .logo { width:26px; height:26px; border-radius:6px; background:#4cae4f; display:flex; align-items:center;
+    justify-content:center; color:#fff; font-weight:800; font-size:15px; }
+  .brand .name { font-size:16px; font-weight:700; color:#fff; }
+  .brand .name span { font-weight:400; color:#8b96a5; font-size:12px; }
+  .nav { padding:10px 0; flex:1; }
+  .nav-item { display:flex; align-items:center; gap:11px; padding:10px 18px; font-size:13.5px; color:#c4ccd6;
+    cursor:pointer; border-left:3px solid transparent; }
+  .nav-item:hover { background:#232f3e; color:#fff; }
+  .nav-item.active { background:#232f3e; color:#fff; border-left-color:#4cae4f; font-weight:600; }
+  .nav-ico { width:18px; text-align:center; opacity:.85; }
+  .side-foot { padding:14px 18px; border-top:1px solid #2b3644; font-size:12px; color:#8b96a5; }
+  /* Main */
+  .main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .topbar { background:#fff; border-bottom:1px solid #dee2e6; padding:10px 22px; display:flex; align-items:center; gap:16px; }
+  .crumbs { font-size:13px; color:#868e96; }
+  .crumbs b { color:#212529; }
+  .search { margin-left:auto; }
+  .search input { width:240px; padding:7px 11px; border:1px solid #ced4da; border-radius:6px; font-size:13px; }
+  .search input:focus { outline:none; border-color:#4cae4f; }
+  .avatar { width:30px; height:30px; border-radius:50%; background:#4cae4f; color:#fff; display:flex; align-items:center;
+    justify-content:center; font-weight:700; font-size:13px; }
+  .content { padding:22px; }
+  .page-head { display:flex; align-items:flex-end; justify-content:space-between; margin-bottom:16px; }
+  .page-head h1 { font-size:20px; font-weight:700; }
+  .page-head .sub { font-size:13px; color:#868e96; margin-top:2px; }
+  .btn-new { background:#4cae4f; color:#fff; border:none; padding:9px 15px; border-radius:6px; font-size:13px;
+    font-weight:600; cursor:pointer; }
+  .tiles { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:18px; }
+  .tile { background:#fff; border:1px solid #e9ecef; border-radius:10px; padding:16px 18px; }
+  .tile-n { font-size:30px; font-weight:800; line-height:1; }
+  .tile-l { font-size:12px; color:#495057; margin-top:6px; text-transform:uppercase; letter-spacing:.5px; font-weight:600; }
+  .tile-l .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
+  .card { background:#fff; border:1px solid #e9ecef; border-radius:10px; overflow:hidden; }
+  .card-head { display:flex; align-items:center; gap:10px; padding:13px 18px; border-bottom:1px solid #f1f3f5; }
+  .card-head .ct { font-size:15px; font-weight:700; }
+  .filters { margin-left:auto; display:flex; gap:8px; }
+  .filters select { font-size:12.5px; padding:5px 8px; border:1px solid #ced4da; border-radius:6px; background:#fff; }
+  table { width:100%; border-collapse:collapse; }
+  thead th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:#868e96;
+    font-weight:700; padding:10px 16px; background:#f8f9fa; border-bottom:1px solid #e9ecef; white-space:nowrap; }
+  .info { color:#adb5bd; cursor:help; margin-left:3px; }
+  .asset-row td { padding:12px 16px; border-bottom:1px solid #f1f3f5; vertical-align:middle; }
+  .asset-row:hover td { background:#f8fbf8; }
+  .asset-cell { display:flex; flex-direction:column; }
+  .asset-name { font-weight:600; }
+  .asset-id { font-size:12px; color:#868e96; }
+  .sub { font-size:11px; color:#adb5bd; margin-top:2px; }
+  .oee-cell { white-space:nowrap; }
+  .hbar { display:inline-block; width:70px; height:7px; background:#e9ecef; border-radius:4px; overflow:hidden; vertical-align:middle; }
+  .hbar-fill { height:100%; }
+  .hbar-txt { font-size:12.5px; margin-left:7px; font-variant-numeric:tabular-nums; }
+  .pm-pill { display:inline-block; padding:2px 9px; border:1px solid; border-radius:11px; font-size:11.5px; font-weight:600; }
+  .pri-pill { display:inline-block; padding:3px 11px; border-radius:12px; color:#fff; font-size:11px; font-weight:700;
+    letter-spacing:.3px; }
+  .chev { color:#adb5bd; font-size:11px; margin-left:8px; }
+  /* Expand panel */
+  .panel-row td { padding:0; background:#f8f9fa; border-bottom:2px solid #e9ecef; }
+  .panel { padding:18px 20px; }
+  .panel-grid { display:grid; grid-template-columns:1.2fr 1.2fr 200px; gap:26px; }
+  .pl { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.8px; color:#868e96; margin-bottom:8px; }
+  .rf-lead { font-size:14px; margin-bottom:6px; }
+  .rf { display:flex; align-items:flex-start; gap:9px; margin-bottom:7px; font-size:13.5px; line-height:1.4; }
+  .rf-n { width:19px; height:19px; border-radius:50%; background:#1b2430; color:#fff; font-size:11px; font-weight:700;
+    display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; margin-top:1px; }
+  .action { background:#fff8e1; border:1px solid #ffe08a; border-radius:6px; padding:9px 12px; font-size:13px; color:#5f4b00; }
+  .dgrid { display:grid; grid-template-columns:auto 1fr; gap:5px 12px; font-size:12.5px; }
+  .dl { color:#868e96; font-weight:600; }
+  .panel-actions { display:flex; flex-direction:column; gap:8px; }
+  .btn { padding:8px 12px; font-size:12.5px; border:1px solid #ced4da; border-radius:6px; background:#fff; cursor:pointer; text-align:center; }
+  .btn:hover { background:#f1f3f5; }
+  .btn-primary { background:#4cae4f; color:#fff; border-color:#4cae4f; font-weight:600; }
+  .btn-primary:hover { background:#409443; }
+  .statusbar { padding:10px 22px; font-size:12px; color:#868e96; display:flex; gap:14px; align-items:center; }
+  .statusbar .sep { color:#dee2e6; }
+</style></head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><div class="logo">L</div><div class="name">Limble<span> CMMS</span></div></div>
+    <nav class="nav"><div class="nav-item"><span class="nav-ico">&#9632;</span>Dashboard</div><div class="nav-item"><span class="nav-ico">&#9776;</span>Work Orders</div><div class="nav-item"><span class="nav-ico">&#9993;</span>Requests</div><div class="nav-item active"><span class="nav-ico">&#9881;</span>Assets</div><div class="nav-item"><span class="nav-ico">&#128197;</span>PM Schedule</div><div class="nav-item"><span class="nav-ico">&#128230;</span>Parts</div><div class="nav-item"><span class="nav-ico">&#128202;</span>Reports</div></nav>
+    <div class="side-foot">Maintenance Planner<br><span style="color:#c4ccd6;">A. Reyes</span></div>
+  </aside>
+  <div class="main">
+    <div class="topbar">
+      <div class="crumbs">Assets <span style="color:#ced4da;">&rsaquo;</span> <b>Machine Health</b></div>
+      <div class="search"><input type="text" id="q" placeholder="Search assets..."></div>
+      <div class="avatar">AR</div>
+    </div>
+    <div class="content">
+      <div class="page-head">
+        <div><h1>Assets &middot; Machine Health</h1>
+          <div class="sub">Fleet ranked by health indicator &middot; updated Mar 31, 2026</div></div>
+        <button class="btn-new">+ New Work Order</button>
+      </div>
+      <div class="tiles"><div class="tile"><div class="tile-n" style="color:#e03131;">3</div><div class="tile-l"><span class="dot" style="background:#e03131;"></span>Critical</div></div><div class="tile"><div class="tile-n" style="color:#f08c00;">0</div><div class="tile-l"><span class="dot" style="background:#f08c00;"></span>Elevated</div></div><div class="tile"><div class="tile-n" style="color:#2f9e44;">9</div><div class="tile-l"><span class="dot" style="background:#2f9e44;"></span>Ok</div></div></div>
+      <div class="card">
+        <div class="card-head">
+          <span class="ct">Machine Assets</span>
+          <div class="filters">
+            <select id="fpri"><option value="All">All tiers</option><option>CRITICAL</option><option>ELEVATED</option><option>OK</option></select>
+          </div>
+        </div>
+        <table>
+          <thead><tr>
+            <th>Asset</th><th>Cell</th><th>OEE</th><th>Calendar PM</th><th>Interval service due</th>
+            <th>Health indicator<span class="info" title="CRITICAL: failure likely within 7 days. ELEVATED: failure likely within 8 to 21 days. OK: no failure expected within 21 days. Click a CRITICAL or ELEVATED row for detail.">&#9432;</span></th>
+          </tr></thead>
+          <tbody>
+    <tr class="asset-row" onclick="toggle(0)" style="cursor:pointer;" id="row-0">
+      <td><div class="asset-cell"><span class="asset-name">Mazak Horizontal Mill</span><span class="asset-id">MCH-011 &middot; 13 yrs</span></div></td>
+      <td>Cell C</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:52%;background:#f08c00;"></div></div><span class="hbar-txt">52%</span> <span style="color:#e03131;">&#9660;</span></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">On Track</span><div class="sub">due 05/11/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 7 days</span><div class="sub">due 04/07/26 &middot; every 7 days</div></td>
+      <td><span class="pri-pill" style="background:#e03131;">CRITICAL</span><span class="chev">&#9662;</span></td>
+    </tr>
+    <tr class="panel-row" id="panel-0" style="display:none;"><td colspan="6">
+      <div class="panel" style="border-left:4px solid #e03131;">
+        <div class="panel-grid">
+          <div><div class="pl">Health indicator</div>
+            <div class="rf-lead"><span class="pri-pill" style="background:#e03131;">CRITICAL</span>
+              &nbsp; Failure likely within 7 days</div>
+            <div class="pl" style="margin-top:12px;">Top risk drivers</div><div class="rf"><span class="rf-n">1</span>Alarm frequency elevated over the recent window</div><div class="rf"><span class="rf-n">2</span>Sustained high utilization limiting maintenance windows</div><div class="rf"><span class="rf-n">3</span>Spindle vibration trending above its normal baseline</div></div>
+          <div><div class="pl">Recommended action</div>
+            <div class="action">Create a corrective work order and schedule within 7 days.</div>
+            <div class="pl" style="margin-top:12px;">Asset detail</div>
+            <div class="dgrid">
+              <span class="dl">Asset</span><span>Mazak Horizontal Mill (MCH-011)</span>
+              <span class="dl">Cell</span><span>Cell C</span>
+              <span class="dl">Age</span><span>13 years</span>
+              <span class="dl">Current OEE</span><span>52%</span>
+              <span class="dl">PM status</span><span>On Track (due 05/11/26)</span>
+              <span class="dl">7-day alarms</span><span>23</span>
+            </div></div>
+          <div class="panel-actions">
+            <button class="btn btn-primary">Create Work Order</button>
+            <button class="btn">Assign Technician</button>
+            <button class="btn">Snooze 7 days</button>
+            <button class="btn">View Asset</button>
+          </div>
+        </div>
+      </div></td></tr>
+    <tr class="asset-row" onclick="toggle(1)" style="cursor:pointer;" id="row-1">
+      <td><div class="asset-cell"><span class="asset-name">Haas Vertical Mill</span><span class="asset-id">MCH-007 &middot; 12 yrs</span></div></td>
+      <td>Cell B</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:61%;background:#f08c00;"></div></div><span class="hbar-txt">61%</span> <span style="color:#e03131;">&#9660;</span></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">On Track</span><div class="sub">due 05/01/26</div></td>
+      <td><span class="pm-pill" style="color:#f08c00;border-color:#f08c00;">In 2 days</span><div class="sub">due 04/02/26 &middot; every 9 days</div></td>
+      <td><span class="pri-pill" style="background:#e03131;">CRITICAL</span><span class="chev">&#9662;</span></td>
+    </tr>
+    <tr class="panel-row" id="panel-1" style="display:none;"><td colspan="6">
+      <div class="panel" style="border-left:4px solid #e03131;">
+        <div class="panel-grid">
+          <div><div class="pl">Health indicator</div>
+            <div class="rf-lead"><span class="pri-pill" style="background:#e03131;">CRITICAL</span>
+              &nbsp; Failure likely within 7 days</div>
+            <div class="pl" style="margin-top:12px;">Top risk drivers</div><div class="rf"><span class="rf-n">1</span>Machine age and failure history indicate elevated mechanical wear risk</div><div class="rf"><span class="rf-n">2</span>Alarm frequency elevated over the recent window</div><div class="rf"><span class="rf-n">3</span>Sustained high utilization limiting maintenance windows</div></div>
+          <div><div class="pl">Recommended action</div>
+            <div class="action">Create a corrective work order and schedule within 7 days.</div>
+            <div class="pl" style="margin-top:12px;">Asset detail</div>
+            <div class="dgrid">
+              <span class="dl">Asset</span><span>Haas Vertical Mill (MCH-007)</span>
+              <span class="dl">Cell</span><span>Cell B</span>
+              <span class="dl">Age</span><span>12 years</span>
+              <span class="dl">Current OEE</span><span>61%</span>
+              <span class="dl">PM status</span><span>On Track (due 05/01/26)</span>
+              <span class="dl">7-day alarms</span><span>14</span>
+            </div></div>
+          <div class="panel-actions">
+            <button class="btn btn-primary">Create Work Order</button>
+            <button class="btn">Assign Technician</button>
+            <button class="btn">Snooze 7 days</button>
+            <button class="btn">View Asset</button>
+          </div>
+        </div>
+      </div></td></tr>
+    <tr class="asset-row" onclick="toggle(2)" style="cursor:pointer;" id="row-2">
+      <td><div class="asset-cell"><span class="asset-name">Mazak Horizontal Mill</span><span class="asset-id">MCH-012 &middot; 10 yrs</span></div></td>
+      <td>Cell C</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:60%;background:#f08c00;"></div></div><span class="hbar-txt">60%</span> <span style="color:#e03131;">&#9660;</span></td>
+      <td><span class="pm-pill" style="color:#f08c00;border-color:#f08c00;">Due Soon</span><div class="sub">due 04/03/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 14 days</span><div class="sub">due 04/14/26 &middot; every 20 days</div></td>
+      <td><span class="pri-pill" style="background:#e03131;">CRITICAL</span><span class="chev">&#9662;</span></td>
+    </tr>
+    <tr class="panel-row" id="panel-2" style="display:none;"><td colspan="6">
+      <div class="panel" style="border-left:4px solid #e03131;">
+        <div class="panel-grid">
+          <div><div class="pl">Health indicator</div>
+            <div class="rf-lead"><span class="pri-pill" style="background:#e03131;">CRITICAL</span>
+              &nbsp; Failure likely within 7 days</div>
+            <div class="pl" style="margin-top:12px;">Top risk drivers</div><div class="rf"><span class="rf-n">1</span>Sustained high utilization limiting maintenance windows</div><div class="rf"><span class="rf-n">2</span>Spindle motor power draw elevated</div><div class="rf"><span class="rf-n">3</span>Recent unplanned downtime elevated (4.5 hrs in the past week)</div></div>
+          <div><div class="pl">Recommended action</div>
+            <div class="action">Create a corrective work order and schedule within 7 days.</div>
+            <div class="pl" style="margin-top:12px;">Asset detail</div>
+            <div class="dgrid">
+              <span class="dl">Asset</span><span>Mazak Horizontal Mill (MCH-012)</span>
+              <span class="dl">Cell</span><span>Cell C</span>
+              <span class="dl">Age</span><span>10 years</span>
+              <span class="dl">Current OEE</span><span>60%</span>
+              <span class="dl">PM status</span><span>Due Soon (due 04/03/26)</span>
+              <span class="dl">7-day alarms</span><span>8</span>
+            </div></div>
+          <div class="panel-actions">
+            <button class="btn btn-primary">Create Work Order</button>
+            <button class="btn">Assign Technician</button>
+            <button class="btn">Snooze 7 days</button>
+            <button class="btn">View Asset</button>
+          </div>
+        </div>
+      </div></td></tr>
+    <tr class="asset-row"  style="" id="row-3">
+      <td><div class="asset-cell"><span class="asset-name">Mazak Horizontal Mill</span><span class="asset-id">MCH-009 &middot; 7 yrs</span></div></td>
+      <td>Cell C</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:68%;background:#f08c00;"></div></div><span class="hbar-txt">68%</span> <span style="color:#2f9e44;">&#9650;</span></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">On Track</span><div class="sub">due 04/09/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 8 days</span><div class="sub">due 04/08/26 &middot; every 27 days</div></td>
+      <td><span class="pri-pill" style="background:#2f9e44;">OK</span></td>
+    </tr>
+    <tr class="asset-row"  style="" id="row-4">
+      <td><div class="asset-cell"><span class="asset-name">Mazak Horizontal Mill</span><span class="asset-id">MCH-010 &middot; 8 yrs</span></div></td>
+      <td>Cell C</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:65%;background:#f08c00;"></div></div><span class="hbar-txt">65%</span> <span style="color:#adb5bd;">&#8594;</span></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">On Track</span><div class="sub">due 04/23/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 5 days</span><div class="sub">due 04/05/26 &middot; every 29 days</div></td>
+      <td><span class="pri-pill" style="background:#2f9e44;">OK</span></td>
+    </tr>
+    <tr class="asset-row"  style="" id="row-5">
+      <td><div class="asset-cell"><span class="asset-name">Haas Vertical Mill</span><span class="asset-id">MCH-006 &middot; 5 yrs</span></div></td>
+      <td>Cell B</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:61%;background:#f08c00;"></div></div><span class="hbar-txt">61%</span> <span style="color:#e03131;">&#9660;</span></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">On Track</span><div class="sub">due 04/12/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 5 days</span><div class="sub">due 04/05/26 &middot; every 27 days</div></td>
+      <td><span class="pri-pill" style="background:#2f9e44;">OK</span></td>
+    </tr>
+    <tr class="asset-row"  style="" id="row-6">
+      <td><div class="asset-cell"><span class="asset-name">Haas Vertical Mill</span><span class="asset-id">MCH-008 &middot; 9 yrs</span></div></td>
+      <td>Cell B</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:64%;background:#f08c00;"></div></div><span class="hbar-txt">64%</span> <span style="color:#2f9e44;">&#9650;</span></td>
+      <td><span class="pm-pill" style="color:#f08c00;border-color:#f08c00;">Due Soon</span><div class="sub">due 04/02/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 4 days</span><div class="sub">due 04/04/26 &middot; every 26 days</div></td>
+      <td><span class="pri-pill" style="background:#2f9e44;">OK</span></td>
+    </tr>
+    <tr class="asset-row"  style="" id="row-7">
+      <td><div class="asset-cell"><span class="asset-name">Fanuc CNC Lathe</span><span class="asset-id">MCH-004 &middot; 8 yrs</span></div></td>
+      <td>Cell A</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:70%;background:#f08c00;"></div></div><span class="hbar-txt">70%</span> <span style="color:#e03131;">&#9660;</span></td>
+      <td><span class="pm-pill" style="color:#f08c00;border-color:#f08c00;">Due Soon</span><div class="sub">due 04/07/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 3 days</span><div class="sub">due 04/03/26 &middot; every 32 days</div></td>
+      <td><span class="pri-pill" style="background:#2f9e44;">OK</span></td>
+    </tr>
+    <tr class="asset-row"  style="" id="row-8">
+      <td><div class="asset-cell"><span class="asset-name">Haas Vertical Mill</span><span class="asset-id">MCH-005 &middot; 2 yrs</span></div></td>
+      <td>Cell B</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:72%;background:#2f9e44;"></div></div><span class="hbar-txt">72%</span> <span style="color:#2f9e44;">&#9650;</span></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">On Track</span><div class="sub">due 05/09/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 21 days</span><div class="sub">due 04/21/26 &middot; every 25 days</div></td>
+      <td><span class="pri-pill" style="background:#2f9e44;">OK</span></td>
+    </tr>
+    <tr class="asset-row"  style="" id="row-9">
+      <td><div class="asset-cell"><span class="asset-name">Fanuc CNC Lathe</span><span class="asset-id">MCH-001 &middot; 2 yrs</span></div></td>
+      <td>Cell A</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:74%;background:#2f9e44;"></div></div><span class="hbar-txt">74%</span> <span style="color:#adb5bd;">&#8594;</span></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">On Track</span><div class="sub">due 05/02/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 31 days</span><div class="sub">due 05/01/26 &middot; every 32 days</div></td>
+      <td><span class="pri-pill" style="background:#2f9e44;">OK</span></td>
+    </tr>
+    <tr class="asset-row"  style="" id="row-10">
+      <td><div class="asset-cell"><span class="asset-name">Fanuc CNC Lathe</span><span class="asset-id">MCH-002 &middot; 4 yrs</span></div></td>
+      <td>Cell A</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:74%;background:#2f9e44;"></div></div><span class="hbar-txt">74%</span> <span style="color:#2f9e44;">&#9650;</span></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">On Track</span><div class="sub">due 04/28/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 33 days</span><div class="sub">due 05/03/26 &middot; every 34 days</div></td>
+      <td><span class="pri-pill" style="background:#2f9e44;">OK</span></td>
+    </tr>
+    <tr class="asset-row"  style="" id="row-11">
+      <td><div class="asset-cell"><span class="asset-name">Fanuc CNC Lathe</span><span class="asset-id">MCH-003 &middot; 6 yrs</span></div></td>
+      <td>Cell A</td>
+      <td class="oee-cell"><div class="hbar"><div class="hbar-fill" style="width:71%;background:#2f9e44;"></div></div><span class="hbar-txt">71%</span> <span style="color:#adb5bd;">&#8594;</span></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">On Track</span><div class="sub">due 04/27/26</div></td>
+      <td><span class="pm-pill" style="color:#2f9e44;border-color:#2f9e44;">In 23 days</span><div class="sub">due 04/23/26 &middot; every 30 days</div></td>
+      <td><span class="pri-pill" style="background:#2f9e44;">OK</span></td>
+    </tr></tbody>
+        </table>
+      </div>
+      <div class="statusbar">
+        <span>12 assets</span><span class="sep">|</span>
+        <span style="color:#e03131;font-weight:600;">3 critical</span><span class="sep">|</span>
+        <span style="color:#f08c00;font-weight:600;">0 elevated</span><span class="sep">|</span>
+        <span>3 suggested work orders</span><span class="sep">|</span>
+        <span>Health indicator by BRIM Machine Health Indicator (random forest, 7-day test ROC-AUC 0.77)</span>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  function toggle(i){ var p=document.getElementById('panel-'+i); if(!p) return;
+    p.style.display = (p.style.display==='none'||!p.style.display)?'table-row':'none'; }
+  document.getElementById('fpri').addEventListener('change', function(){
+    var v=this.value;
+    document.querySelectorAll('.asset-row').forEach(function(r){
+      var pill=r.querySelector('.pri-pill'); if(!pill) return;
+      var show = (v==='All') || pill.textContent.trim()===v;
+      r.style.display = show?'':'none';
+      var pan=document.getElementById('panel-'+r.id.split('-')[1]); if(pan&&!show) pan.style.display='none';
+    });
+  });
+  document.getElementById('q').addEventListener('input', function(){
+    var q=this.value.toLowerCase();
+    document.querySelectorAll('.asset-row').forEach(function(r){
+      r.style.display = r.textContent.toLowerCase().includes(q)?'':'none';
+    });
+  });
+</script>
+</body></html>

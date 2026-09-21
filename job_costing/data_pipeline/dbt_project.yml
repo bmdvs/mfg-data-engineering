@@ -1,0 +1,68 @@
+name: 'job_costing'
+version: '1.0.0'
+profile: 'job_costing'
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+vars:
+  # Observation window and the engagement, kept in sync with data_source/generate/config.py.
+  start_date: '2023-07-01'
+  end_date: '2026-06-30'
+  analysis_year: 2025
+  engagement_start: '2026-04-06'
+  # Configuration change dates (first day the new behavior appears in the data).
+  estimate_to_job_date: '2026-04-27'
+  po_job_required_date: '2026-04-27'
+  rate_pools_date: '2026-05-04'
+  labor_codes_date: '2026-05-04'
+  scrap_reason_date: '2026-05-11'
+  monitoring_to_jobs_date: '2026-05-11'
+  scan_rollout_date: '2026-04-13'
+  # The secondary cells where labor posting was never turned on before the terminals moved
+  no_posting_work_centers: ['DBR-03', 'INS-02', 'MDP-01']
+  # Costing conventions and detection thresholds, as documented in the audit.
+  target_markup: 0.28             # markup on cost the shop quotes to
+  stale_standard_tolerance: 0.15  # standard more than this off the measured cycle is stale
+  open_record_hours: 4.5          # a clock record longer than this crossing a shift boundary is left open
+  small_lot_threshold: 25
+  infrequent_part_days: 365       # a part not run in this many days, or never run, sets up as new on the mill-turn and 5-axis cells
+  # The in-progress variance flag (the job in progress screen): an element more than this share over
+  # its estimate to date, and at least the minimum amount over, while the job is still open.
+  inprogress_threshold: 0.15
+  inprogress_min_hours: 2.0
+  inprogress_min_dollars: 150
+  inprogress_actionable_days: 3   # a flag raised fewer days than this before ship leaves nothing to act on
+  # The reporting layer's job variance rules (Job Cost dashboard and Job Variance report).
+  # A below-target job's shortfall is allocated to the elements over estimate in proportion to their
+  # overrun; where no element carries this share of the overrun, it is not attributable.
+  shortfall_dominance_share: 0.50
+  # Driver rules: a driver fires when its test holds; the largest dollar variance wins, and a job
+  # whose largest firing driver carries less than driver_min_share of the overrun is not attributable.
+  driver_run_ratio: 1.15
+  driver_setup_ratio: 1.30
+  driver_vendor_ratio: 1.10
+  driver_scrap_share: 0.05
+  driver_material_share: 0.10
+  driver_min_share: 0.40
+  # Machines installed in or before this year are the older machines in their cell.
+  older_machine_install_year: 2010
+  assignment_min_confidence: 0.6
+
+models:
+  job_costing:
+    staging:
+      +materialized: view
+    profiling:
+      +materialized: table
+    data_quality:
+      +materialized: table
+    intermediate:
+      +materialized: table
+    marts:
+      +materialized: table

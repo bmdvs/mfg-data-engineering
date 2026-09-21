@@ -1,0 +1,422 @@
+version: 2
+
+models:
+
+  # ── mart_oee__machine_performance ─────────────────────────────────────────
+  - name: mart_oee__machine_performance
+    description: >
+      OEE decomposed into Availability, Performance, and Quality Rate by machine,
+      shift, and day. Grain: one row per (machine_id, shift, period_date).
+    columns:
+      - name: performance_key
+        tests:
+          - not_null
+          - unique
+      - name: availability
+        tests:
+          - not_null
+      - name: performance
+        tests:
+          - not_null
+      - name: oee
+        tests:
+          - not_null
+    tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "oee >= 0 and oee <= 1"
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "abs(oee - round(availability * performance * quality_rate, 4)) < 0.001"
+
+  # ── mart_oee__downtime_analysis ───────────────────────────────────────────
+  - name: mart_oee__downtime_analysis
+    description: >
+      Unified downtime fact: unplanned-down intervals from the MachineMetrics
+      state log, and from Limble the unplanned repairs, the interval services and
+      the calendar PMs. Grain: one row per downtime event.
+    columns:
+      - name: downtime_key
+        tests:
+          - not_null
+          - unique
+      - name: source_system
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['MACHINE_STATE', 'CMMS_REPAIR', 'CMMS_INTERVAL_SERVICE', 'CMMS_CALENDAR_PM']
+      - name: downtime_type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['unplanned', 'planned']
+      - name: machine_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('int_dim_machines')
+                field: machine_id
+      - name: failure_code
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['TOOLING', 'MECHANICAL', 'ELECTRICAL', 'OPERATOR_INDUCED', 'ENVIRONMENTAL']
+              config:
+                where: "source_system in ('CMMS_REPAIR', 'CMMS_INTERVAL_SERVICE')"
+      - name: downtime_hours
+        tests:
+          - not_null
+      - name: is_shift_startup
+        tests:
+          - not_null
+
+  # ── mart_oee__pm_compliance ───────────────────────────────────────────────
+  - name: mart_oee__pm_compliance
+    description: >
+      Preventive-maintenance compliance and current tracker status. Grain: one
+      row per machine.
+    columns:
+      - name: machine_id
+        tests:
+          - not_null
+          - unique
+      - name: pct_ontime
+        tests:
+          - not_null
+      - name: pm_status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['Overdue', 'Due Soon', 'On Track']
+
+  # ── mart_oee__operator_setup ──────────────────────────────────────────────
+  - name: mart_oee__operator_setup
+    description: >
+      Operator setup-time summary versus the machinist cohort median. Grain: one
+      row per machinist.
+    columns:
+      - name: operator_id
+        tests:
+          - not_null
+          - unique
+      - name: total_jobs
+        tests:
+          - not_null
+      - name: median_setup_hours
+        tests:
+          - not_null
+      - name: setup_ratio_vs_cohort
+        tests:
+          - not_null
+
+  # ── mart_ml__health_features ──────────────────────────────────────────────
+  - name: mart_ml__health_features
+    description: >
+      Feature table for the machine health indicator. Grain: one row per
+      (machine_id, observation_date, shift). Backward-looking features and two
+      forward-looking targets: an unplanned repair opening within 7 and within 21
+      days. A target is null where the window runs past the end of the record.
+      days_since_last_repair counts from the last unplanned repair or interval
+      service, whichever is later.
+    columns:
+      - name: days_since_last_repair
+        tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: "> 0"
+              config:
+                where: "days_since_last_repair is not null"
+      - name: repair_interval_days
+        tests:
+          - not_null
+      - name: share_of_interval_elapsed
+        tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: "> 0"
+              config:
+                where: "share_of_interval_elapsed is not null"
+      - name: days_to_next_interval_service
+        tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+              config:
+                where: "days_to_next_interval_service is not null"
+      - name: observation_key
+        tests:
+          - not_null
+          - unique
+      - name: machine_id
+        tests:
+          - not_null
+      - name: observation_date
+        tests:
+          - not_null
+      - name: machine_type
+        tests:
+          - not_null
+      - name: rolling_7d_unplanned_downtime_hours
+        tests:
+          - not_null
+      - name: rolling_7d_alarm_count
+        tests:
+          - not_null
+      - name: rolling_30d_alarm_count
+        tests:
+          - not_null
+      - name: count_late_pms_last_6m
+        tests:
+          - not_null
+      - name: target_failure_7d
+        tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: target_failure_21d
+        tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [machine_id, observation_date, shift]
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "coalesce(target_failure_7d, 0) <= coalesce(target_failure_21d, 1)"
+
+  # ── mart_oee__reliability ─────────────────────────────────────────────────
+  - name: mart_oee__reliability
+    description: >
+      Reliability by machine. MTBF is running hours per unplanned repair; the
+      second measure counts interval services with the unplanned repairs. MTTR is
+      the mean downtime hours of an unplanned repair. Grain: one row per machine.
+    columns:
+      - name: machine_id
+        tests:
+          - not_null
+          - unique
+      - name: run_hours
+        tests:
+          - not_null
+      - name: unplanned_repairs
+        tests:
+          - not_null
+      - name: interval_services
+        tests:
+          - not_null
+      - name: unplanned_repair_hours
+        tests:
+          - not_null
+      - name: interval_service_hours
+        tests:
+          - not_null
+      - name: repair_interval_days
+        tests:
+          - not_null
+      - name: mtbf_hours
+        tests:
+          - not_null
+      - name: hours_between_repairs_planned_and_unplanned
+        tests:
+          - not_null
+      - name: mttr_hours
+        tests:
+          - not_null
+      - name: last_repair_date
+        tests:
+          - not_null
+      - name: interval_service_due_date
+        tests:
+          - not_null
+      - name: days_until_interval_service
+        tests:
+          - not_null
+    tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "hours_between_repairs_planned_and_unplanned <= mtbf_hours"
+
+  # ── mart_ml__scoring_quarter_failures ─────────────────────────────────────
+  - name: mart_ml__scoring_quarter_failures
+    description: >
+      The scoring quarter's unplanned failures, one row each, with the days since
+      the machine's last repair against its repair interval, the health
+      indicator's rating on each of the 7 days before the repair opened and the
+      rules baseline's reading over the same days. Built after scoring.
+    columns:
+      - name: maintenance_id
+        tests:
+          - not_null
+          - unique
+      - name: machine_id
+        tests:
+          - not_null
+      - name: failure_date
+        tests:
+          - not_null
+      - name: failure_code
+        tests:
+          - not_null
+      - name: downtime_hours
+        tests:
+          - not_null
+      - name: repair_interval_days
+        tests:
+          - not_null
+      - name: last_repair_type
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['UNPLANNED_REPAIR', 'PLANNED_INTERVAL']
+      - name: interval_reached_before_failure
+        tests:
+          - not_null
+      - name: indicator_critical_days_before
+        tests:
+          - not_null
+      - name: warned_before
+        tests:
+          - not_null
+      - name: rules_critical_days_before
+        tests:
+          - not_null
+      - name: rules_warned_before
+        tests:
+          - not_null
+      - name: calendar_pm_warned_before
+        tests:
+          - not_null
+      - name: warned_before_21d
+        tests:
+          - not_null
+      - name: rules_warned_before_21d
+        tests:
+          - not_null
+      - name: calendar_pm_warned_before_21d
+        tests:
+          - not_null
+      - name: indicator_rating_1d_before
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CRITICAL', 'ELEVATED', 'OK']
+      - name: indicator_rating_2d_before
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CRITICAL', 'ELEVATED', 'OK']
+      - name: indicator_rating_3d_before
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CRITICAL', 'ELEVATED', 'OK']
+      - name: indicator_rating_4d_before
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CRITICAL', 'ELEVATED', 'OK']
+      - name: indicator_rating_5d_before
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CRITICAL', 'ELEVATED', 'OK']
+      - name: indicator_rating_6d_before
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CRITICAL', 'ELEVATED', 'OK']
+      - name: indicator_rating_7d_before
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CRITICAL', 'ELEVATED', 'OK']
+
+  # ── mart_ml__tier_history ─────────────────────────────────────────────────
+  - name: mart_ml__tier_history
+    description: >
+      The health indicator's rating and the two baselines' readings by machine
+      and day, with what followed in the next 7 days and the next 21. Built after scoring.
+    columns:
+      - name: machine_day_key
+        tests:
+          - not_null
+          - unique
+      - name: machine_id
+        tests:
+          - not_null
+      - name: observation_date
+        tests:
+          - not_null
+      - name: in_scoring_quarter
+        tests:
+          - not_null
+      - name: indicator_rating
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CRITICAL', 'ELEVATED', 'OK']
+      - name: rules_rating
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CRITICAL', 'ELEVATED', 'OK']
+      - name: unplanned_repair_within_7d
+        tests:
+          - not_null
+      - name: interval_service_within_7d
+        tests:
+          - not_null
+      - name: unplanned_repair_within_21d
+        tests:
+          - not_null
+      - name: interval_service_within_21d
+        tests:
+          - not_null
+      - name: in_test_period
+        tests:
+          - not_null
+      - name: calendar_pm_rating
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CRITICAL', 'ELEVATED', 'OK']
+
+  # ── mart_ml__test_failures ────────────────────────────────────────────────
+  - name: mart_ml__test_failures
+    description: >
+      The held-out test period's unplanned failures, one row each, with whether
+      the health indicator and each baseline read CRITICAL in the 7 days before
+      and CRITICAL or ELEVATED in the 21 days before. Built after scoring.
+    columns:
+      - name: maintenance_id
+        tests:
+          - not_null
+          - unique
+      - name: machine_id
+        tests:
+          - not_null
+      - name: failure_date
+        tests:
+          - not_null
+      - name: warned_before
+        tests:
+          - not_null
+      - name: rules_warned_before
+        tests:
+          - not_null
+      - name: calendar_pm_warned_before
+        tests:
+          - not_null
+      - name: warned_before_21d
+        tests:
+          - not_null
+      - name: rules_warned_before_21d
+        tests:
+          - not_null
+      - name: calendar_pm_warned_before_21d
+        tests:
+          - not_null

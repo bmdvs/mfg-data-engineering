@@ -1,0 +1,28 @@
+[project]
+name = "mfg-defects-scrap"
+version = "0.2.0"
+description = "Defect and scrap analytics for a sheet-metal fabrication shop: pipeline, diagnostic report and dashboard"
+requires-python = ">=3.11"
+
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "faker>=20.0",
+    "duckdb>=0.10",
+    "dbt-core>=1.8",
+    "dbt-duckdb>=1.8",
+    "matplotlib>=3.8",
+    "prefect>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "black>=24.0",
+    "ruff>=0.3",
+    "playwright>=1.40",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["data_source*"]

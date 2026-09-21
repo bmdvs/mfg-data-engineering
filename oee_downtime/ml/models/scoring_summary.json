@@ -1,0 +1,121 @@
+{
+  "scoring_start": "2026-01-01",
+  "scoring_end": "2026-03-31",
+  "rows_scored": 1848,
+  "out_of_order_share": 0.12716450216450217,
+  "windows": [
+    {
+      "split": "scoring",
+      "source": "model",
+      "window_days": 7,
+      "rows": 1704,
+      "positive_rate": 0.05868544600938967,
+      "roc_auc": 0.7903927680798005,
+      "average_precision": 0.19115508692442174,
+      "threshold": 0.15,
+      "precision": 0.17751479289940827,
+      "recall": 0.3,
+      "flagged_share": 0.09917840375586855,
+      "brier": 0.05121934419310412
+    },
+    {
+      "split": "scoring",
+      "source": "model",
+      "window_days": 21,
+      "rows": 1416,
+      "positive_rate": 0.1638418079096045,
+      "roc_auc": 0.6224188897949674,
+      "average_precision": 0.2233764834270277,
+      "threshold": 0.29411764705882354,
+      "precision": 0.2222222222222222,
+      "recall": 0.25862068965517243,
+      "flagged_share": 0.1906779661016949,
+      "brier": 0.15813136278903692
+    },
+    {
+      "split": "scoring",
+      "source": "calendar_pm",
+      "window_days": 7,
+      "rows": 1704,
+      "positive_rate": 0.05868544600938967,
+      "roc_auc": 0.447780548628429,
+      "average_precision": 0.055514160230198395,
+      "threshold": NaN,
+      "precision": 0.03225806451612903,
+      "recall": 0.12,
+      "flagged_share": 0.21830985915492956,
+      "brier": NaN
+    },
+    {
+      "split": "scoring",
+      "source": "calendar_pm",
+      "window_days": 21,
+      "rows": 1416,
+      "positive_rate": 0.1638418079096045,
+      "roc_auc": 0.4463245573159366,
+      "average_precision": 0.15540776421026203,
+      "threshold": NaN,
+      "precision": 0.09395973154362416,
+      "recall": 0.1206896551724138,
+      "flagged_share": 0.21045197740112995,
+      "brier": NaN
+    },
+    {
+      "split": "scoring",
+      "source": "rules",
+      "window_days": 7,
+      "rows": 1704,
+      "positive_rate": 0.05868544600938967,
+      "roc_auc": 0.5770324189526185,
+      "average_precision": 0.07634047764849969,
+      "threshold": NaN,
+      "precision": 0.12173913043478261,
+      "recall": 0.28,
+      "flagged_share": 0.13497652582159625,
+      "brier": NaN
+    },
+    {
+      "split": "scoring",
+      "source": "rules",
+      "window_days": 21,
+      "rows": 1416,
+      "positive_rate": 0.1638418079096045,
+      "roc_auc": 0.5878087138863001,
+      "average_precision": 0.19473520741713057,
+      "threshold": NaN,
+      "precision": 0.2103825136612022,
+      "recall": 0.6637931034482759,
+      "flagged_share": 0.5169491525423728,
+      "brier": NaN
+    }
+  ],
+  "tiers": [
+    {
+      "split": "scoring",
+      "source": "model",
+      "failures": 11,
+      "critical_within_7d_share": 0.7272727272727273,
+      "critical_median_lead_days": 6.0,
+      "critical_or_elevated_within_21d_share": 0.7272727272727273,
+      "critical_or_elevated_median_lead_days": 19.5
+    },
+    {
+      "split": "scoring",
+      "source": "calendar_pm",
+      "failures": 11,
+      "critical_within_7d_share": 0.2727272727272727,
+      "critical_median_lead_days": 7.0,
+      "critical_or_elevated_within_21d_share": 0.6363636363636364,
+      "critical_or_elevated_median_lead_days": 21.0
+    },
+    {
+      "split": "scoring",
+      "source": "rules",
+      "failures": 11,
+      "critical_within_7d_share": 0.5454545454545454,
+      "critical_median_lead_days": 7.0,
+      "critical_or_elevated_within_21d_share": 0.8181818181818182,
+      "critical_or_elevated_median_lead_days": 20.0
+    }
+  ]
+}
