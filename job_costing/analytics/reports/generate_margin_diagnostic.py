@@ -466,6 +466,12 @@ def build(d):
         rows.append({"part_number": pn, "customer": g["customer_name"].iloc[0], "releases": int(releases[pn]), "loss_jobs": len(g),
                      "loss": g["loss_"].sum(), "driver": dv.index[0], "same": len(dv) == 1})
     parts = pd.DataFrame(rows).sort_values("loss", ascending=False); top15 = parts.head(15)
+    # the loss-making jobs on those parts, by driver, and the largest single job on the largest part
+    rep_jobs = loss[loss["part_number"].isin(parts["part_number"])]
+    rep_drv = rep_jobs.groupby("driver").agg(jobs=("job_id", "size"), loss=("loss_", "sum")).sort_values("loss", ascending=False)
+    big_part = parts.iloc[0]
+    big_job = rep_jobs[rep_jobs["part_number"] == big_part["part_number"]].sort_values("loss_", ascending=False).iloc[0]
+    low = lambda t: t[0].lower() + t[1:]
     cum = (loss["loss_"].cumsum() / tot_loss).to_numpy()
     half_n = int((cum >= 0.5).argmax()) + 1
     top_half = loss.head(half_n)
@@ -561,7 +567,7 @@ In the ERP, each job carries a cost overrun driver with an accompanying action t
 {k1(by_driver.loc['Routing standard', 'loss'])}. Along with routing standards, the other drivers that sit with the estimator, including prices set
 below estimated cost, setups on new or infrequent parts and vendor rate, account for {pct(job_share(estimator_drivers), 1)} of the jobs that lost
 money, or {pct(drv_share(estimator_drivers), 1)} of the total loss. The drivers that sit with the floor and the front office, unbilled revision work,
-scrap and rework and material, account for {pct(job_share(floor_drivers), 1)} of the jobs that lost money, or {pct(drv_share(floor_drivers), 1)} of
+scrap and rework, and material, account for {pct(job_share(floor_drivers), 1)} of the jobs that lost money, or {pct(drv_share(floor_drivers), 1)} of
 the total loss. On {len(accepted)} jobs, {k1(accepted['loss_'].sum())} of the {k1(tot_loss)}, no single driver accounts for the cost overrun; those
 jobs are excluded from the chart below.</p>
 {B.chart(f"Loss making jobs by driver, {YEAR}", chart_loss_by_driver(by_driver))}
@@ -572,10 +578,15 @@ vertical line were expected to lose money; the rest were not. The routing-standa
 revision work fell a median of {revision['fall'].median() * 100:.0f} points, and the {len(furthest)} jobs driven by
 {fall_med.index[0][0].lower() + fall_med.index[0][1:]} fell the furthest, a median of {fall_med.iloc[0] * 100:.0f} points.</p>
 {B.chart(f"Loss making jobs, actual vs. estimated margin, {YEAR}", chart_est_vs_actual(loss))}
-{sub("Parts that lost money more than once")}
+{sub("Parts that lost money on more than one job")}
 <p>{len(parts)} parts lost money on two or more jobs in {YEAR}; they account for {int(parts['loss_jobs'].sum())} jobs and
 {k1(parts['loss'].sum())} of the loss. The chart shows the fifteen largest, with how many of the part's {YEAR} jobs lost money and the driver behind
-them. On {int(top15['same'].sum())} of the 15 parts the driver is the same on every loss-making job.</p>
+them. On {int(top15['same'].sum())} of the 15 parts the driver is the same on every loss-making job. Across the {len(parts)} parts,
+{low(rep_drv.index[0])} overruns are the largest driver, behind {int(rep_drv['jobs'].iloc[0])} of the {len(rep_jobs)} jobs and
+{k1(rep_drv['loss'].iloc[0])} ({pct(rep_drv['loss'].iloc[0] / rep_jobs['loss_'].sum(), 1)}) of the loss, followed by
+{'prices set below estimated cost' if rep_drv.index[1] == 'Priced below estimated cost' else low(rep_drv.index[1])} on {int(rep_drv['jobs'].iloc[1])} jobs
+and {k1(rep_drv['loss'].iloc[1])} ({pct(rep_drv['loss'].iloc[1] / rep_jobs['loss_'].sum(), 1)}). One part, {big_part['part_number']}, accounts for
+{k1(big_part['loss'])} of the {k1(parts['loss'].sum())}, and {k1(big_job['loss_'])} of that is a single job with a {low(big_job['driver'])} overrun.</p>
 {B.chart("The Fifteen Parts with the Largest Loss over Two or More Jobs", chart_repeat_losers(top15))}
 {sub("Job loss concentration")}
 <p>The chart below shows the cumulative share of the total loss by job. The {half_n} largest job losses account for {pct(cum[half_n - 1])} of the
