@@ -18,6 +18,17 @@ Analytics and ML layers built on top, enabling real-time KPI monitoring, deep-di
 
 &nbsp;
 
+**Downtime, OEE & Machine Health**:
+[`oee_downtime/`](oee_downtime/)
+
+- Built on precision machining shop's data records (MES, IIoT sensors, CMMS, ERP, HR)
+- Cleans production, machine, and maintenance record data, integrates data source systems, and builds automated data pipeline flow
+- Machine learning model monitors machine health and forecasts upcoming machine breakdowns, embedded into CMMS system
+- KPI dashboard provides real-time monitoring of OEE and downtime, across the fleet and by machine
+- Analytics diagnostic report details drivers of lost OEE by machine  
+
+&nbsp;
+
 **Job Costing**:
 [`job_costing/`](job_costing/)
 
@@ -25,17 +36,6 @@ Analytics and ML layers built on top, enabling real-time KPI monitoring, deep-di
 - Cleans ERP data records, integrates data systems, and builds automated data pipeline flow
 - Job costing and margin analytics embedded into ERP system
 - Analytics diagnostic report details job margin distributions, job cost overruns vs. estimates, and jobs that lost money    
-
-&nbsp;
-
-**OEE & Machine Health**:
-[`downtime_oee/`](downtime_oee/)
-
-- Built on precision machining shop's data records (MES, IIoT sensors, CMMS, ERP, HR)
-- Cleans production, machine, and maintenance record data, integrates data source systems, and builds automated data pipeline flow
-- Machine learning model forecasts upcoming machine breakdowns, embedded into CMMS system
-- KPI dashboard provides real-time monitoring of OEE and machine health
-- Analytics diagnostic report details drivers of lost OEE by machine  
 
 &nbsp;
 
