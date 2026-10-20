@@ -9,7 +9,7 @@ Analytics and ML layers built on top, enabling real-time KPI monitoring, deep-di
 ## Project Folders
 
 **Defects & Scrap Costs**:
-[`defects_scrap/`](defects_scrap/)
+[`folder`](defects_scrap/)
 
 - Built on sheet-metal fabrication shop's data records (ERP, MES, QMS, Materials, HR)
 - Cleans production, inspection, and material data records, integrates data source systems, and builds automated data pipeline flow
@@ -19,7 +19,7 @@ Analytics and ML layers built on top, enabling real-time KPI monitoring, deep-di
 &nbsp;
 
 **Downtime, OEE & Machine Health**:
-[`oee_downtime/`](downtime_oee/)
+[`folder`](downtime_oee/)
 
 - Built on precision machining shop's data records (MES, IIoT sensors, CMMS, ERP, HR)
 - Cleans production, machine, and maintenance record data, integrates data source systems, and builds automated data pipeline flow
@@ -30,7 +30,7 @@ Analytics and ML layers built on top, enabling real-time KPI monitoring, deep-di
 &nbsp;
 
 **Job Costing**:
-[`job_costing/`](job_costing/)
+[`folder`](job_costing/)
 
 - Built on precision machining shop's data records (ERP and machine-monitoring sensors)
 - Cleans ERP data records, integrates data systems, and builds automated data pipeline flow
