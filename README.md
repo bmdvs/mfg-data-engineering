@@ -19,7 +19,7 @@ Analytics and ML layers built on top, enabling real-time KPI monitoring, deep-di
 &nbsp;
 
 **Downtime, OEE & Machine Health**:
-[`oee_downtime/`](oee_downtime/)
+[`oee_downtime/`](downtime_oee/)
 
 - Built on precision machining shop's data records (MES, IIoT sensors, CMMS, ERP, HR)
 - Cleans production, machine, and maintenance record data, integrates data source systems, and builds automated data pipeline flow
