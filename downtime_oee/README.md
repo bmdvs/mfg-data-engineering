@@ -1,4 +1,4 @@
-# OEE & Machine Health
+# Downtime, OEE & Machine Health
 
 **Data engineering, analytics and machine learning for a precision machining shop, applied to OEE, downtime and machine health.**
 
