@@ -8,17 +8,18 @@ An **analytics and ML layer** is built on the cleaned and integrated data:
 
 1. **Analytics diagnostic report** on where OEE is lost, what drives unplanned downtime, and what it costs
 2. **KPI dashboard** tracking OEE, downtime, and reliability (MTBF, MTTR) by machine, daily and monthly
-3. **Machine learning model** that forecasts machine breakdowns and rates every machine daily as CRITICAL, ELEVATED or OK. Supported by technical documentation and monitoring in production
-
+3. **Machine learning model** forecasts the risk of upcoming breakdowns for every machine daily. Supported by [technical documentation](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/technical_report.html) and [monitoring in production](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/monitoring_report.html).
+    - Note: this model is a machine health indicator rather than a full predictive maintenance system. Its condition-monitoring data is at a daily grain, too coarse to show a fault developing, so its predictions rest mainly on days since last repair, machine age and utilization. For a predictive maintenance system built on granular vibration measurements and controller data, see [predictive-maintenance-ml](https://github.com/bmdvs/predictive-maintenance-ml).   
+    
 The OEE dashboard monitors daily machine health KPIs and provides monthly trends, with additional detail the user can scroll through:
 
-[![KPI dashboard: plant OEE, availability, performance and quality for the current shift, with the daily summary and the past month](docs/screenshots/dashboard.png)](https://brimsystems.github.io/mfg-data-engineering/downtime_oee/docs/reports/dashboard.html)
+[![KPI dashboard: plant OEE, availability, performance and quality for the current shift, with the daily summary and the past month](docs/screenshots/dashboard.png)](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/dashboard.html)
 
 The ML model's machine health forecasts are embedded in the shop's CMMS asset list:
 
-[![CMMS asset list with the machine health indicator](docs/screenshots/cmms_queue.png)](https://brimsystems.github.io/mfg-data-engineering/downtime_oee/docs/index.html)
+[![CMMS asset list with the machine health indicator](docs/screenshots/cmms_queue.png)](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/index.html)
 
-> **[Open the CMMS asset list →](https://brimsystems.github.io/mfg-data-engineering/downtime_oee/docs/index.html)** · **[All six deliverables →](https://brimsystems.github.io/mfg-data-engineering/downtime_oee/)**
+> **[Open the CMMS asset list →](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/index.html)** · **[All six deliverables →](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/)**
 
 ---
 
@@ -30,7 +31,7 @@ To support this decision, this project detailed each machine's availability, per
 
 By integrating the machines' condition-monitoring sensors with the shop's ERP, MES, CMMS, and HR records, new insights were surfaced on the drivers behind each machine's availability, performance, unplanned downtime, and maintenance needs. Six actions came out of it, from a reliability review on the oldest machines to a shift-start warm-up routine, worth about $430K a year in contribution margin if target levels were achieved.
 
-The ML model embedded into the shop's CMMS labels each machine's current health as CRITICAL, ELEVATED, or OK, and ranks them by urgency. This was intended to supplement the shop's existing repair-interval maintenance process, enabling preventative maintenance actions on machines that were close to breaking down. Over the quarter, 11 unplanned machine failures occurred despite this repair-interval maintenance. The model successfully flagged 8 of 11 of these unplanned failures. Acting on the indicator's flags would have avoided an estimated 85 hours of unplanned downtime in the quarter, about $44,000 a year in contribution margin. The model's full results are detailed in the ml overview report. We believe this model is a valuable early-warning and maintenance prioritisation tool alongside the shop's existing repair-interval method. 
+The ML model embedded into the shop's CMMS labels each machine's current health as CRITICAL, ELEVATED, or OK, and ranks them by urgency. Over the quarter, 11 unplanned machine failures occurred despite this repair-interval maintenance. The model successfully flagged 8 of 11 of these unplanned failures. Acting on the indicator's flags would have avoided an estimated 85 hours of unplanned downtime in the quarter, about $44,000 a year in contribution margin. The model's full results are detailed in the ml overview report. We believe this model is a valuable early-warning and maintenance prioritisation tool alongside the shop's existing repair-interval method. 
 
 ---
 
@@ -38,12 +39,12 @@ The ML model embedded into the shop's CMMS labels each machine's current health 
 
 | # | Deliverable | What it is | Links |
 |---|---|---|---|
-| 1 | CMMS asset list with the health indicator | The machine health indicator embedded in the shop's CMMS: each machine's health indicator, the drivers behind it, its PM status and current OEE, ranked by urgency. | [View](https://brimsystems.github.io/mfg-data-engineering/downtime_oee/docs/index.html) |
-| 2 | Analytics diagnostic report | Where OEE is lost across availability and performance, the downtime Pareto and its cost, PM compliance, and the cross-system findings on alarms, PM status and operator setup. | [View](https://brimsystems.github.io/mfg-data-engineering/downtime_oee/docs/reports/analytics_report.html) |
-| 3 | KPI dashboard | The recurring daily and monthly view of OEE, downtime, MTBF and MTTR by machine, with trends. | [View](https://brimsystems.github.io/mfg-data-engineering/downtime_oee/docs/reports/dashboard.html) |
-| 4 | ML model overview & performance report | What the model forecasts, how it was trained, what followed its ratings against a rule the shop could run without a model, and its limits. | [View](https://brimsystems.github.io/mfg-data-engineering/downtime_oee/docs/reports/model_overview.html) |
-| 5 | ML technical report | Feature construction from the marts, the two target windows, the time-based split, model selection and tuning, calibration, thresholds, and the baseline comparison. | [View](https://brimsystems.github.io/mfg-data-engineering/downtime_oee/docs/reports/technical_report.html) |
-| 6 | MLOps monitoring report | Monthly monitoring on performance, target, prediction and feature drift with a rules-based retraining decision. | [View](https://brimsystems.github.io/mfg-data-engineering/downtime_oee/docs/reports/monitoring_report.html) |
+| 1 | CMMS asset list with the health indicator | The machine health indicator embedded in the shop's CMMS: each machine's health indicator, the drivers behind it, its PM status and current OEE, ranked by urgency. | [View](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/index.html) |
+| 2 | Analytics diagnostic report | Where OEE is lost across availability and performance, the downtime Pareto and its cost, PM compliance, and the cross-system findings on alarms, PM status and operator setup. | [View](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/analytics_report.html) |
+| 3 | KPI dashboard | The recurring daily and monthly view of OEE, downtime, MTBF and MTTR by machine, with trends. | [View](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/dashboard.html) |
+| 4 | ML model overview & performance report | What the model forecasts, how it was trained, what followed its ratings against a rule the shop could run without a model, and its limits. | [View](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/model_overview.html) |
+| 5 | ML technical report | Feature construction from the marts, the two target windows, the time-based split, model selection and tuning, calibration, thresholds, and the baseline comparison. | [View](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/technical_report.html) |
+| 6 | MLOps monitoring report | Monthly monitoring on performance, target, prediction and feature drift with a rules-based retraining decision. | [View](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/monitoring_report.html) |
 
 ---
 
@@ -161,4 +162,4 @@ The report generators write standalone HTML; the copies served by GitHub Pages l
 
 ---
 
-Brian Davis. Data engineering and applied analytics/ML for manufacturers. Other work: [github.com/brimsystems](https://github.com/brimsystems?tab=repositories).
+Brian Davis. Data engineering and applied analytics/ML for manufacturers. Other work: [github.com/bmdvs](https://github.com/bmdvs?tab=repositories).
