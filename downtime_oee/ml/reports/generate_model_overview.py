@@ -495,8 +495,8 @@ def exec_drivers_table():
     # is ordered for readability rather than strictly by SHAP magnitude.
     drivers = [
         "Spindle vibration elevated above its normal baseline",
-        "Sensor anomaly across the condition-monitoring channels",
         "Where the machine stands in its repair interval",
+        "Sensor anomaly across the condition-monitoring channels",
         "Machine age",
         "Utilization and maintenance-window pressure",
     ]
