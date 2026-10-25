@@ -8,8 +8,10 @@ An **analytics and ML layer** is built on the cleaned and integrated data:
 
 1. **Analytics diagnostic report** on where OEE is lost, what drives unplanned downtime, and what it costs
 2. **KPI dashboard** tracking OEE, downtime, and reliability (MTBF, MTTR) by machine, daily and monthly
-3. **Machine learning model** that monitors machine health and forecasts risk of upcoming breakdowns for every machine daily. Supported by technical documentation and monitoring in production
-
+3. **Machine learning model** forecasts the risk of upcoming breakdowns for every machine daily.
+  - Supported by [technical documentation](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/technical_report.html) and [monitoring in production](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/monitoring_report.html)
+  - Note this is a light version of a predictive maintenance model, with condition-monitoring sensor data at a daily grain, and so driven by days since last repair, machine age, and utilization. For a more realistic predictive maintenance model, see the repo [here](https://github.com/bmdvs/predictive-maintenance-ml).   
+    
 The OEE dashboard monitors daily machine health KPIs and provides monthly trends, with additional detail the user can scroll through:
 
 [![KPI dashboard: plant OEE, availability, performance and quality for the current shift, with the daily summary and the past month](docs/screenshots/dashboard.png)](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/dashboard.html)
