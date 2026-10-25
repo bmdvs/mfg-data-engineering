@@ -8,8 +8,8 @@ An **analytics and ML layer** is built on the cleaned and integrated data:
 
 1. **Analytics diagnostic report** on where OEE is lost, what drives unplanned downtime, and what it costs
 2. **KPI dashboard** tracking OEE, downtime, and reliability (MTBF, MTTR) by machine, daily and monthly
-3. **Machine learning model** forecasts the risk of upcoming breakdowns for every machine daily. Supported by [technical documentation](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/technical_report.html) and [monitoring in production](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/monitoring_report.html)
-    - Note: this model is a machine health indicator rather than a full predictive maintenance system. Its condition-monitoring data is at a daily grain, too coarse to show a fault developing, so its predictions rest mainly on days since last repair, machine age and utilization. For a predictive maintenance system built on granular vibration measurements and controller data, see [predictive-maintenance-ml.](https://github.com/bmdvs/predictive-maintenance-ml).   
+3. **Machine learning model** forecasts the risk of upcoming breakdowns for every machine daily. Supported by [technical documentation](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/technical_report.html) and [monitoring in production](https://bmdvs.github.io/mfg-data-engineering/downtime_oee/docs/reports/monitoring_report.html).
+    - Note: this model is a machine health indicator rather than a full predictive maintenance system. Its condition-monitoring data is at a daily grain, too coarse to show a fault developing, so its predictions rest mainly on days since last repair, machine age and utilization. For a predictive maintenance system built on granular vibration measurements and controller data, see [predictive-maintenance-ml](https://github.com/bmdvs/predictive-maintenance-ml).   
     
 The OEE dashboard monitors daily machine health KPIs and provides monthly trends, with additional detail the user can scroll through:
 
