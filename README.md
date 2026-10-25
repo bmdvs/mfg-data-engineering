@@ -21,9 +21,9 @@ Analytics and ML layers built on top, enabling real-time KPI monitoring, deep-di
 
 - Built on precision machining shop's data records (MES, IIoT sensors, CMMS, ERP, HR)
 - Cleans production, machine, and maintenance record data, integrates data source systems, and builds automated data pipeline flow
-- Machine learning model monitors machine health and forecasts upcoming machine breakdowns, embedded into CMMS system
 - KPI dashboard provides real-time monitoring of OEE and downtime, across the fleet and by machine
 - Analytics diagnostic report details drivers of lost OEE by machine  
+- ML model forecasts machine health indicators, embedded into CMMS system
 
 &nbsp;
 
