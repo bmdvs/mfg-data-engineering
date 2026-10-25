@@ -16,17 +16,17 @@ An **analytics layer** was then built on the cleaned job cost record: the **job 
 
 The **Job Cost Screen** shows actual costs against estimate by each element, for both current and completed jobs, and flags predicted cost overruns: 
 
-[![ERP job cost screen, in progress: actual against estimate by element with source tags and the in-progress flag](docs/screenshots/job_in_progress.png)](https://brimsystems.github.io/mfg-data-engineering/job_costing/docs/index.html)
+[![ERP job cost screen, in progress: actual against estimate by element with source tags and the in-progress flag](docs/screenshots/job_in_progress.png)](https://bmdvs.github.io/mfg-data-engineering/job_costing/docs/index.html)
 
 The **Job Cost dashboard** is the summary of completed jobs by period, including an overview of job margins and cost overruns, and the top 10 jobs with the largest margin miss vs. estimates.  
 
-[![Job Cost dashboard: margin, jobs below estimate, shortfall by element and the below-estimate jobs with a driver each](docs/screenshots/job_cost_dashboard.png)](https://brimsystems.github.io/mfg-data-engineering/job_costing/docs/erp/job_cost_dashboard.html)
+[![Job Cost dashboard: margin, jobs below estimate, shortfall by element and the below-estimate jobs with a driver each](docs/screenshots/job_cost_dashboard.png)](https://bmdvs.github.io/mfg-data-engineering/job_costing/docs/erp/job_cost_dashboard.html)
 
 The **Job Variance report** groups the same jobs (by job, part, cost element, work center, material, lot size, estimator or month), and the driver behind each job's margin miss vs. estimates.
 
-[![Job Variance report, grouped by job: estimate against actual by element, the driver and the action status on each job](docs/screenshots/job_variance_job.png)](https://brimsystems.github.io/mfg-data-engineering/job_costing/docs/erp/job_variance_report.html)
+[![Job Variance report, grouped by job: estimate against actual by element, the driver and the action status on each job](docs/screenshots/job_variance_job.png)](https://bmdvs.github.io/mfg-data-engineering/job_costing/docs/erp/job_variance_report.html)
 
-> **[Open the live job cost screen &rarr;](https://brimsystems.github.io/mfg-data-engineering/job_costing/docs/index.html)** &nbsp;·&nbsp; **[All the deliverables &rarr;](https://brimsystems.github.io/mfg-data-engineering/job_costing/)**
+> **[Open the live job cost screen &rarr;](https://bmdvs.github.io/mfg-data-engineering/job_costing/docs/index.html)** &nbsp;·&nbsp; **[All the deliverables &rarr;](https://bmdvs.github.io/mfg-data-engineering/job_costing/)**
 ---
 
 ## Business Context
@@ -45,11 +45,11 @@ The four ERP outputs, then the two reports.
 
 | # | Deliverable | What it is | Links |
 |---|---|---|---|
-| 1 | Job cost screen | One screen in two states. **In progress**: actual against estimate by element as transactions post, each element tagged measured or estimated with its source, the estimate to date, the variance on completed work, the in-progress flag and the projected cost at completion. **Completed**: the same layout with the final variance, what drove it in plain words, and any estimated or unrepairable element. | [In progress](https://brimsystems.github.io/mfg-data-engineering/job_costing/docs/index.html) · [Completed](https://brimsystems.github.io/mfg-data-engineering/job_costing/docs/erp/job_closeout.html) |
-| 2 | Job Cost dashboard | The summary of completed jobs by period, for the monthly close and the quarterly pricing review: margin, jobs below estimate and losing, the shortfall by element, estimate against actual by element, and the below-estimate jobs with the driver each rule assigns. | [View](https://brimsystems.github.io/mfg-data-engineering/job_costing/docs/erp/job_cost_dashboard.html) |
-| 3 | Job Variance report | One paginated report that groups the same jobs by job, part, cost element, work center, material, lot size, estimator and month. | [View](https://brimsystems.github.io/mfg-data-engineering/job_costing/docs/erp/job_variance_report.html) |
-| 4 | Report: job costing ERP implementation and data quality audit | The changes made to the ERP to capture estimated and actual job cost by element, the data sources feeding the Jobs table, then the audit: every type of error found across the ERP's job costing tables, seventeen in all, the error remediation process, and the before-and-after results. | [View](https://brimsystems.github.io/mfg-data-engineering/job_costing/docs/reports/data_quality_audit.html) |
-| 5 | Analytics diagnostic report: job costing & margin | How margin is spread across the shop's jobs and why, from the corrected job cost: the 2025 margin overview, actual cost against estimate by element, blended rate vs. work-center pool rates, and the jobs that lost money with an action each. | [View](https://brimsystems.github.io/mfg-data-engineering/job_costing/docs/reports/margin_diagnostic.html) |
+| 1 | Job cost screen | One screen in two states. **In progress**: actual against estimate by element as transactions post, each element tagged measured or estimated with its source, the estimate to date, the variance on completed work, the in-progress flag and the projected cost at completion. **Completed**: the same layout with the final variance, what drove it in plain words, and any estimated or unrepairable element. | [In progress](https://bmdvs.github.io/mfg-data-engineering/job_costing/docs/index.html) · [Completed](https://bmdvs.github.io/mfg-data-engineering/job_costing/docs/erp/job_closeout.html) |
+| 2 | Job Cost dashboard | The summary of completed jobs by period, for the monthly close and the quarterly pricing review: margin, jobs below estimate and losing, the shortfall by element, estimate against actual by element, and the below-estimate jobs with the driver each rule assigns. | [View](https://bmdvs.github.io/mfg-data-engineering/job_costing/docs/erp/job_cost_dashboard.html) |
+| 3 | Job Variance report | One paginated report that groups the same jobs by job, part, cost element, work center, material, lot size, estimator and month. | [View](https://bmdvs.github.io/mfg-data-engineering/job_costing/docs/erp/job_variance_report.html) |
+| 4 | Report: job costing ERP implementation and data quality audit | The changes made to the ERP to capture estimated and actual job cost by element, the data sources feeding the Jobs table, then the audit: every type of error found across the ERP's job costing tables, seventeen in all, the error remediation process, and the before-and-after results. | [View](https://bmdvs.github.io/mfg-data-engineering/job_costing/docs/reports/data_quality_audit.html) |
+| 5 | Analytics diagnostic report: job costing & margin | How margin is spread across the shop's jobs and why, from the corrected job cost: the 2025 margin overview, actual cost against estimate by element, blended rate vs. work-center pool rates, and the jobs that lost money with an action each. | [View](https://bmdvs.github.io/mfg-data-engineering/job_costing/docs/reports/margin_diagnostic.html) |
 
 ---
 

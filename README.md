@@ -38,4 +38,4 @@ Analytics and ML layers built on top, enabling real-time KPI monitoring, deep-di
 
 ## Author
 
-Brian Davis. Data engineering and applied analytics/ML for manufacturers. Other work: [github.com/brimsystems](https://github.com/brimsystems?tab=repositories).
+Brian Davis. Data engineering and applied analytics/ML for manufacturers. Other work: [github.com/bmdvs](https://github.com/bmdvs?tab=repositories).

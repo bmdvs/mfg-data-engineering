@@ -9,9 +9,9 @@ An **analytics layer** is built on the cleaned and integrated data:
 1. **Analytics diagnostic report** detailing six conditions that raise the defect rate, with each multiplier and what it costs; each finding was surfaced through the new cross-system integrations 
 2. **KPI dashboard** tracking defects, defect rate and scrap cost by week, month and trailing twelve months, along with additional detail behind these measures
 
-[![KPI dashboard: defects and scrap cost, weekly, monthly and trailing twelve months](docs/screenshots/dashboard.png)](https://brimsystems.github.io/mfg-data-engineering/defects_scrap/docs/reports/dashboard.html)
+[![KPI dashboard: defects and scrap cost, weekly, monthly and trailing twelve months](docs/screenshots/dashboard.png)](https://bmdvs.github.io/mfg-data-engineering/defects_scrap/docs/reports/dashboard.html)
 
-> **[Open the diagnostic report →](https://brimsystems.github.io/mfg-data-engineering/defects_scrap/docs/reports/report.html)** · **[Open the dashboard →](https://brimsystems.github.io/mfg-data-engineering/defects_scrap/docs/reports/dashboard.html)** · **[Both deliverables →](https://brimsystems.github.io/mfg-data-engineering/defects_scrap/)**
+> **[Open the diagnostic report →](https://bmdvs.github.io/mfg-data-engineering/defects_scrap/docs/reports/report.html)** · **[Open the dashboard →](https://bmdvs.github.io/mfg-data-engineering/defects_scrap/docs/reports/dashboard.html)** · **[Both deliverables →](https://bmdvs.github.io/mfg-data-engineering/defects_scrap/)**
 
 ---
 
@@ -32,8 +32,8 @@ This project cleaned each system's extract, reconciled the identifiers and joine
 
 | # | Deliverable | What it is | Links |
 |---|---|---|---|
-| 1 | Analytics diagnostic report | Details six conditions that are associated with elevated defect rates on jobs, each measured on the joined record with its composition and cost. | [View](https://brimsystems.github.io/mfg-data-engineering/defects_scrap/docs/reports/report.html) |
-| 2 | KPI dashboard | Weekly, monthly and trailing-twelve-month KPI tiles for defects and scrap cost, along with additional detail on these measures. | [View](https://brimsystems.github.io/mfg-data-engineering/defects_scrap/docs/reports/dashboard.html) |
+| 1 | Analytics diagnostic report | Details six conditions that are associated with elevated defect rates on jobs, each measured on the joined record with its composition and cost. | [View](https://bmdvs.github.io/mfg-data-engineering/defects_scrap/docs/reports/report.html) |
+| 2 | KPI dashboard | Weekly, monthly and trailing-twelve-month KPI tiles for defects and scrap cost, along with additional detail on these measures. | [View](https://bmdvs.github.io/mfg-data-engineering/defects_scrap/docs/reports/dashboard.html) |
 
 ---
 
@@ -120,4 +120,4 @@ The report generators write standalone HTML; the copies served by GitHub Pages l
 
 ---
 
-Brian Davis. Data engineering and applied analytics/ML for manufacturers. Other work: [github.com/brimsystems](https://github.com/brimsystems?tab=repositories).
+Brian Davis. Data engineering and applied analytics/ML for manufacturers. Other work: [github.com/bmdvs](https://github.com/bmdvs?tab=repositories).
